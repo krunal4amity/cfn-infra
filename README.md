@@ -12,8 +12,8 @@ application specific resources.
 Please resolve the `todo` items before you go ahead running
 the pipeline.
 
-Make sure before using the repo's pipeline, you have created the following
-gitlab environment variables.
+Make sure the following environment variables are available
+in your pipeline tool.
 
 - `<stage>`\_AWS_ACCESS_KEY_ID
 - `<stage>`\_AWS_SECRET_ACCESS_KEY
