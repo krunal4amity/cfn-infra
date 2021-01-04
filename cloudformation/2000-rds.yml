@@ -1,0 +1,530 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: DB template
+# WARNING: please set DbParm resource values according to optimal performance requirements...
+#
+# if a schema data is to be imported, the following command can be run, assuming postgresql package has been yum-installed.
+# pg_dump -d <databasename> -h <hostname> -p <port> -n <schemaname> -f <location of the dump file>
+# to import a database file run the following command
+# psql -f schemadump.sql -p port -U username -W dbpasswd -h host -d dbname
+# once inside psql prompt, fire \dt (list tables), \dn (list schema), \l (list DBs)
+# may need to grant permission 'grant all on schema public to public;'
+Parameters:
+  S3Bucket:
+    Type: String
+  S3Prefix:
+    Type: String
+  StageName:
+    Type: String
+  RepositoryName:
+    Type: String
+Conditions:
+  IsProd: !Equals
+    - !Ref "StageName"
+    - prd
+Resources:
+  DbParam:
+    #a list of parameters that can be set for postgres is available at https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Appendix.PostgreSQL.CommonDBATasks.html
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Description: DB parameters for database
+      Family: postgres11
+      Parameters: # todo WARNING : need to settle on what to put here, for now temporary...
+        max_connections: "500"
+
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "DbAlerts-${StageName}"
+
+  DatabaseBurstBalanceTooLowAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: IsProd
+    Properties:
+      AlarmActions:
+        - !Ref AlertTopic
+      AlarmDescription: "Average database storage burst balance over last 10 minutes too low, expect a significant performance drop soon."
+      ComparisonOperator: LessThanThreshold
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref Postgres
+      EvaluationPeriods: 1
+      MetricName: BurstBalance
+      Namespace: "AWS/RDS"
+      OKActions:
+        - !Ref AlertTopic
+      Period: 600
+      Statistic: Average
+      Threshold: 20
+
+  DatabaseCPUUtilizationTooHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: IsProd
+    Properties:
+      AlarmActions:
+        - !Ref AlertTopic
+      AlarmDescription: "Average database CPU utilization over last 10 minutes too high."
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref Postgres
+      EvaluationPeriods: 1
+      MetricName: CPUUtilization
+      Namespace: "AWS/RDS"
+      OKActions:
+        - !Ref AlertTopic
+      Period: 600
+      Statistic: Average
+      Threshold: 80
+
+  DatabaseCPUCreditBalanceTooLowAlarm:
+    Type: "AWS::CloudWatch::Alarm"
+    Condition: IsProd
+    Properties:
+      AlarmActions:
+        - !Ref AlertTopic
+      AlarmDescription: "Average database CPU credit balance over last 10 minutes too low, expect a significant performance drop soon."
+      ComparisonOperator: LessThanThreshold
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref Postgres
+      EvaluationPeriods: 1
+      MetricName: CPUCreditBalance
+      Namespace: "AWS/RDS"
+      OKActions:
+        - !Ref AlertTopic
+      Period: 600
+      Statistic: Average
+      Threshold: 20
+
+  DatabaseDiskQueueDepthTooHighAlarm:
+    Type: "AWS::CloudWatch::Alarm"
+    Condition: IsProd
+    Properties:
+      AlarmActions:
+        - !Ref AlertTopic
+      AlarmDescription: "Average database disk queue depth over last 10 minutes too high, performance may suffer."
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref Postgres
+      EvaluationPeriods: 1
+      MetricName: DiskQueueDepth
+      Namespace: "AWS/RDS"
+      OKActions:
+        - !Ref AlertTopic
+      Period: 600
+      Statistic: Average
+      Threshold: 64
+
+  DatabaseFreeableMemoryTooLowAlarm:
+    Type: "AWS::CloudWatch::Alarm"
+    Condition: IsProd
+    Properties:
+      AlarmActions:
+        - !Ref AlertTopic
+      AlarmDescription: "Average database freeable memory over last 10 minutes too low, performance may suffer."
+      ComparisonOperator: LessThanThreshold
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref Postgres
+      EvaluationPeriods: 1
+      MetricName: FreeableMemory
+      Namespace: "AWS/RDS"
+      OKActions:
+        - !Ref AlertTopic
+      Period: 600
+      Statistic: Average
+      Threshold: 64000000 # 64 Megabyte in Byte
+
+  DatabaseFreeStorageSpaceTooLowAlarm:
+    Type: "AWS::CloudWatch::Alarm"
+    Condition: IsProd
+    Properties:
+      AlarmActions:
+        - !Ref AlertTopic
+      AlarmDescription: "Average database free storage space over last 10 minutes too low."
+      ComparisonOperator: LessThanThreshold
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref Postgres
+      EvaluationPeriods: 1
+      MetricName: FreeStorageSpace
+      Namespace: "AWS/RDS"
+      OKActions:
+        - !Ref AlertTopic
+      Period: 600
+      Statistic: Average
+      Threshold: 2000000000 # 2 Gigabyte in Byte
+
+  DatabaseSwapUsageTooHighAlarm:
+    Type: "AWS::CloudWatch::Alarm"
+    Condition: IsProd
+    Properties:
+      AlarmActions:
+        - !Ref AlertTopic
+      AlarmDescription: "Average database swap usage over last 10 minutes too high, performance may suffer."
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref Postgres
+      EvaluationPeriods: 1
+      MetricName: SwapUsage
+      Namespace: "AWS/RDS"
+      OKActions:
+        - !Ref AlertTopic
+      Period: 600
+      Statistic: Average
+      Threshold: 256000000 # 256 Megabyte in Byte
+
+  DatabaseEventSubscription:
+    Type: AWS::RDS::EventSubscription
+    Condition: IsProd
+    Properties:
+      EventCategories:
+        - failover
+        - failure
+        - "low storage"
+        - maintenance
+        - notification
+        - recovery
+      SnsTopicArn: !Ref AlertTopic
+      SourceIds:
+        - !Ref Postgres
+      SourceType: "db-instance"
+
+  DBKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: "DB CMK"
+      KeyPolicy:
+        Version: "2012-10-17"
+        Id: "default"
+        Statement:
+          - Sid: "Enable IAM User Permissions"
+            Effect: "Allow"
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+
+  DBSecret:
+    Type: "AWS::SecretsManager::Secret"
+    Properties:
+      Name: !Sub "postgressMaster${StageName}"
+      Description: !Sub "Database secret for ${StageName}RDS"
+      KmsKeyId: !Ref DBKey
+      GenerateSecretString:
+        SecretStringTemplate: !Sub '{"username": "mydbuser"}' #username hardcoded - 'mydbuser'
+        GenerateStringKey: "password"
+        PasswordLength: 15
+        ExcludePunctuation: true
+
+  DBSecretAttachment:
+    Type: "AWS::SecretsManager::SecretTargetAttachment"
+    Properties:
+      SecretId: !Ref DBSecret
+      TargetType: "AWS::RDS::DBInstance"
+      TargetId: !Ref Postgres
+
+  DbSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "PostGresSg-${StageName}"
+      GroupDescription: Access to DB (Postgres)
+      SecurityGroupIngress:
+        - CidrIp: !Sub "{{resolve:ssm://${StageName}/common/vpccidr:1}}"
+          FromPort: "5432"
+          IpProtocol: tcp
+          ToPort: "5432"
+      VpcId: !Sub "{{resolve:ssm://${StageName}/common/vpcid:1}}"
+
+  DbSlavSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "PostGresSlave-${StageName}-SG"
+      GroupDescription: Access to DB Slave (Postgres)
+      SecurityGroupIngress:
+        - CidrIp: !Sub "{{resolve:ssm://${StageName}/common/vpccidr:1}}"
+          FromPort: "5432"
+          IpProtocol: tcp
+          ToPort: "5432"
+      VpcId: !Sub "{{resolve:ssm://${StageName}/common/vpcid:1}}"
+
+  DbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: DB Subnet group
+      DBSubnetGroupName: !Sub "PostgresSubnetGroup-${StageName}"
+      SubnetIds:
+        - !Sub "{{resolve:ssm://${StageName}/common/privatesubnetA:1}}"
+        - !Sub "{{resolve:ssm://${StageName}/common/privatesubnetB:1}}"
+        - !Sub "{{resolve:ssm://${StageName}/common/privatesubnetC:1}}"
+
+  Postgres:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: !Sub "db-${StageName}"
+      AllocatedStorage: !Sub "{{resolve:ssm://${StageName}/rds/allocatedstorage:1}}"
+      AllowMajorVersionUpgrade: !If
+        - IsProd
+        - "false"
+        - "true"
+      AutoMinorVersionUpgrade: !If
+        - IsProd
+        - "false"
+        - "true"
+      BackupRetentionPeriod: "30"
+      CopyTagsToSnapshot: "true"
+      DBInstanceClass: !Sub "{{resolve:ssm://${StageName}/rds/instanceclass:1}}"
+      DBName: !Sub "{{resolve:ssm://${StageName}/rds/dbname:1}}"
+      DBParameterGroupName: !Ref "DbParam"
+      DBSubnetGroupName: !Ref "DbSubnetGroup"
+      DeleteAutomatedBackups: !If
+        - IsProd
+        - "false"
+        - "true"
+      DeletionProtection: !If
+        - IsProd
+        - "true"
+        - "false"
+      EnablePerformanceInsights: !If
+        - IsProd
+        - "true"
+        - "false"
+      Engine: !Sub "{{resolve:ssm://${StageName}/rds/engine:1}}"
+      EngineVersion: !Sub "{{resolve:ssm://${StageName}/rds/engineversion:1}}"
+      MasterUsername: !Sub "{{resolve:secretsmanager:${DBSecret}:SecretString:username}}"
+      MasterUserPassword: !Sub "{{resolve:secretsmanager:${DBSecret}:SecretString:password}}"
+      MultiAZ: !If
+        - IsProd
+        - "true"
+        - "false"
+      Port: "5432"
+      PubliclyAccessible: "false"
+      StorageEncrypted: !If
+        - IsProd
+        - "true"
+        - "false"
+      StorageType: gp2
+      PreferredBackupWindow: !Sub "{{resolve:ssm://${StageName}/rds/preferredbackupwindow:1}}"
+      PreferredMaintenanceWindow: !Sub "{{resolve:ssm://${StageName}/rds/preferredmaintenancewindow:1}}"
+      VPCSecurityGroups:
+        - !Ref "DbSg"
+
+  PostgresSlave:
+    Type: AWS::RDS::DBInstance
+    Condition: IsProd
+    DependsOn:
+      - Postgres
+    Properties:
+      AllocatedStorage: !Sub "{{resolve:ssm://${StageName}/rds/allocatedstorage:1}}"
+      DBInstanceClass: !Sub "{{resolve:ssm://${StageName}/rds/instanceclass:1}}"
+      DBParameterGroupName: !Ref "DbParam"
+      EnablePerformanceInsights: !If
+        - IsProd
+        - "true"
+        - "false"
+      Engine: !Sub "{{resolve:ssm://${StageName}/rds/engine:1}}"
+      EngineVersion: !Sub "{{resolve:ssm://${StageName}/rds/engineversion:1}}"
+      Port: "5432"
+      PubliclyAccessible: "false"
+      StorageEncrypted: !If
+        - IsProd
+        - "true"
+        - "false"
+      StorageType: gp2
+      SourceDBInstanceIdentifier: !Sub "db-${StageName}"
+      VPCSecurityGroups:
+        - !Ref "DbSlavSg"
+
+  DbRecordSet:
+    Type: AWS::Route53::RecordSet
+    DependsOn:
+      - Postgres
+    Properties:
+      Comment: "Master DB endpoint"
+      HostedZoneId: !Sub "{{resolve:ssm://${StageName}/common/privater53zoneid:1}}"
+      TTL: 300
+      ResourceRecords:
+        - !GetAtt "Postgres.Endpoint.Address"
+      Name: !Join
+        - ""
+        - - db-
+          - !Ref "StageName"
+          - .
+          - !Sub "{{resolve:ssm://${StageName}/common/privater53domain:1}}"
+      Type: CNAME
+
+  DbSlaveRecordSet:
+    Type: AWS::Route53::RecordSet
+    Condition: IsProd
+    DependsOn:
+      - PostgresSlave
+    Properties:
+      Comment: "Slave DB endpoint"
+      HostedZoneId: !Sub "{{resolve:ssm://${StageName}/common/privater53zoneid:1}}"
+      TTL: 300
+      ResourceRecords:
+        - !GetAtt "PostgresSlave.Endpoint.Address"
+      Name: !Join
+        - ""
+        - - db-slave-
+          - !Ref "StageName"
+          - .
+          - !Sub "{{resolve:ssm://${StageName}/common/privater53domain:1}}"
+      Type: CNAME
+
+  SshAccessSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Join
+        - "-"
+        - - PostGresClientSshAccess
+          - !Ref "StageName"
+      GroupDescription: security group to access postgres client ec2 machine
+      SecurityGroupIngress:
+        - CidrIp: !Sub "{{resolve:ssm://${StageName}/common/vpccidr:1}}"
+          FromPort: "22"
+          IpProtocol: tcp
+          ToPort: "22"
+      VpcId: !Sub "{{resolve:ssm://${StageName}/common/vpcid:1}}"
+
+  PostgresClientRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: PGClientS3BucketAccess
+                Action:
+                  - s3:ListBucket
+                Effect: Allow
+                Resource:
+                  - !Sub "arn:aws:s3:::${S3Bucket}"
+              - Sid: SecretMangerAccess
+                Action:
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:ListSecretVersionIds
+                  - secretsmanager:ListSecrets
+                Effect: Allow
+                Resource:
+                  - !Ref DBSecret
+              - Sid: PGClientS3ObjectAccess
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:PutObject
+                Effect: Allow
+                Resource:
+                  - !Sub "arn:aws:s3:::${S3Bucket}/${S3Prefix}/*"
+              - Sid: AccessToKMS
+                Action:
+                  - "kms:Describe*"
+                  - "kms:Get*"
+                  - "kms:List*"
+                  - "kms:Decrypt"
+                Effect: Allow
+                Resource:
+                  - !GetAtt "DBKey.Arn"
+          PolicyName: !Join
+            - "-"
+            - - PostgresclientAccessPolicy
+              - !Ref "StageName"
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  PostgresClientIAMProfile:
+    Type: "AWS::IAM::InstanceProfile"
+    Properties:
+      Path: /
+      Roles:
+        - !Ref "PostgresClientRole"
+
+  DBClient:
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - Postgres
+    Properties:
+      KeyName: !Sub "{{resolve:ssm://${StageName}/common/keypair:1}}"
+      ImageId: !Sub "{{resolve:ssm://${StageName}/common/amznlinux2x86ami:1}}"
+      IamInstanceProfile: !Ref PostgresClientIAMProfile
+      InstanceType: t2.small #choosing t2.small by default
+      SecurityGroupIds:
+        - !Ref SshAccessSG
+      SubnetId: !Sub "{{resolve:ssm://${StageName}/common/privatesubnetA:1}}"
+      UserData: !Base64
+        Fn::Sub: |
+          #!/bin/bash -xe
+          yum update -y
+          yum install postgresql -y
+          yum install jq -y
+
+          #fetch secret username and password
+          secret=$(aws secretsmanager get-secret-value --secret-id postgressMaster${StageName} --region ${AWS::Region} --query SecretString )
+          dbuser=$(echo $secret | jq . -r | jq -r .username)
+          dbpwd=$(echo $secret | jq . -r | jq -r .password)
+          dbhost=$(echo $secret | jq . -r | jq -r .host)
+          dbport=$(echo $secret | jq . -r | jq -r .port)
+          dbname=$(echo $secret | jq . -r | jq -r .dbname)
+
+          #import sql files. Note: Put import-order the same as alphabetical order if sequence matters.
+          cd /tmp
+          aws s3 cp s3://${S3Bucket}/${S3Prefix}/_postgres . --recursive
+
+          if [ -d ./${StageName} ];then
+            if [ $(ls ./${StageName} | wc -l) -gt 0 ];then
+              for i in $(ls ./${StageName})
+                do
+                  PGPASSWORD=$dbpwd psql -f ./${StageName}/$i -h $dbhost -p $dbport -U $dbuser -d $dbname >> /tmp/postgresout.txt
+                  if [ $? != 0 ];then
+                    echo "could not apply $i" >> /tmp/postgresout.txt
+                    break
+                  fi
+                done
+            fi
+          fi
+      Tags:
+        - Key: Name
+          Value: !Sub "${StageName}-postgresclient"
+
+Outputs:
+  DbEndpoint:
+    Description: The endpoint of postgres db to connect to
+    Value: !GetAtt "Postgres.Endpoint.Address"
+    Export:
+      Name: !Sub "${AWS::StackName}-DbEndpoint"
+  DbPort:
+    Description: The port of postgres db to connect to
+    Value: !GetAtt "Postgres.Endpoint.Port"
+    Export:
+      Name: !Sub "${AWS::StackName}-DbPort"
+  DbSlaveEndpoint:
+    Description: The endpoint of postgres db to connect to
+    Value: !GetAtt "PostgresSlave.Endpoint.Address"
+    Condition: IsProd
+    Export:
+      Name: !Sub "${AWS::StackName}-DbSlaveEndpoint"
+  DbSlavePort:
+    Description: The port of postgres db to connect to
+    Value: !GetAtt "PostgresSlave.Endpoint.Port"
+    Condition: IsProd
+    Export:
+      Name: !Sub "${AWS::StackName}-DbSlavePort"
+  DBClientRole:
+    Description: An IAM role with postgres specific access
+    Value: !Ref PostgresClientRole
+    Export:
+      Name: !Sub "${AWS::StackName}-DBClientRole"

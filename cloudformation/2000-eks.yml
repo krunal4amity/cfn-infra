@@ -1,0 +1,647 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: EKS template
+# follow this for nodes creation: https://docs.aws.amazon.com/eks/latest/userguide/launch-workers.html
+# To set up nodes access to cluster: https://docs.aws.amazon.com/eks/latest/userguide/managing-auth.html
+# The name of the EKS Cluster is in format ${AppName}-${StageName}-EksCluster.
+Parameters:
+  AppName:
+    Type: String
+    Default: myapp
+  S3Bucket:
+    Type: String
+  S3Prefix:
+    Type: String
+  StageName:
+    Type: String
+  RepositoryName:
+    Type: String
+  NodeImageIdSSMParam:
+    Type: "AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>"
+    Default: /aws/service/eks/optimized-ami/1.14/amazon-linux-2/recommended/image_id
+    Description: AWS Systems Manager Parameter Store parameter of the AMI ID for the worker node instances.
+  BootstrapArguments:
+    Type: String
+    Default: ""
+    Description: "Arguments to pass to the bootstrap script. See files/bootstrap.sh in https://github.com/awslabs/amazon-eks-ami"
+Conditions:
+  IsProd: !Equals
+    - !Ref "StageName"
+    - prd
+Resources:
+  #Standard EksClusterSG. Following the link https://docs.aws.amazon.com/eks/latest/userguide/sec-group-reqs.html
+  EksClusterSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Join
+        - "-"
+        - - !Sub "EksClusterSG-${AppName}"
+          - !Ref "StageName"
+      GroupDescription: !Sub "EksClusterSG-${AppName}-${StageName}"
+      VpcId: !Sub "{{resolve:ssm:/me/${StageName}/common/vpcid:1}}"
+      Tags:
+        - Key: Name
+          Value: !Join
+            - "-"
+            - - !Sub "EksClusterSG-${AppName}"
+              - !Ref "StageName"
+
+  #standard EKS Service Role. Follow the link https://docs.aws.amazon.com/eks/latest/userguide/service_IAM_role.html
+  EksServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - eks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSServicePolicy
+        - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+
+  #K8sClientRole : The role to be attached to EC2 instance acting as k8sclient running kubectl, creating configMap (or any other
+  #app specific files) to allow nodes to communicate to EKS Cluster.
+  #We need s3 access to download yaml files.
+  #EKS read access to wait for the cluster to come alive in ACTIVE state before running kubectl.
+  #This role is used in in EKSCluster(which is a custom resource), EKSCluster will be created using this role (hence iam:Passrole permission.
+  #Kubectl needs to be run using the same role as the one that created it to create configMap allows nodes to communicate with ApiServer
+  K8sClientRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: KubeClientS3BucketAccess
+                Action:
+                  - s3:ListBucket
+                Effect: Allow
+                Resource:
+                  - !Sub "arn:aws:s3:::${S3Bucket}"
+              - Sid: KubeClientS3ObjectAccess
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:PutObject
+                Effect: Allow
+                Resource:
+                  - !Sub "arn:aws:s3:::${S3Bucket}/*"
+              - Sid: ClusterCreateAccess
+                Action:
+                  - eks:CreateCluster
+                  - eks:DescribeCluster
+                  - eks:ListClusters
+                  - eks:DeleteCluster
+                  - eks:UpdateClusterConfig
+                  - eks:UpdateClusterVersion
+                Effect: Allow
+                Resource: !Sub "arn:aws:eks:${AWS::Region}:${AWS::AccountId}:cluster/*"
+              - Sid: PassroleAccess
+                Effect: Allow
+                Action:
+                  - iam:GetRole
+                  - iam:PassRole
+                Resource: !GetAtt "EksServiceRole.Arn"
+              - Sid: TagSubnetsForIngress
+                Effect: Allow
+                Action:
+                  - ec2:CreateTags
+                  - ec2:DeleteTags
+                Resource: "*"
+              - Sid: GetSSMParameters
+                Effect: Allow
+                Action:
+                  - ssm:DescribeParameters
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                Resource: "*"
+              - Sid: AssociateVPCWithHostedZone # meant for private api server to create an aws-managed private r53 hosted zone.
+                Action:
+                  - route53:AssociateVPCWithHostedZone
+                  - route53:ChangeResourceRecordSets # to be able to create record sets
+                  - route53:ListResourceRecordSets
+                Effect: Allow
+                Resource: "*"
+              - Sid: DescribeLoadBalancersV2
+                Action:
+                  - elasticloadbalancing:DescribeLoadBalancers
+                Effect: Allow
+                Resource: "*"
+          PolicyName: !Join
+            - "-"
+            - - KubeClientS3AccessPolicy
+              - !Ref "StageName"
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  #Lambda Function that will be used to Create an EKS Cluster.
+  EksFunc:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        S3Bucket: !Ref "S3Bucket"
+        S3Key: !Join
+          - "/"
+          - - !Ref "S3Prefix"
+            - ekscluster.zip
+      Handler: main
+      Role: !GetAtt "K8sClientRole.Arn"
+      Runtime: go1.x
+      Timeout: "20"
+
+  #EKSCluster is a custom cloudformation resource.
+  #Cloudformation only support creating an EKS cluster (control plane) out of the box as a resource.
+  #All the nodes required have to be created separately as EC2 instances.
+  #To allow nodes to communicate to EKS cluster a configMap object needs to be created manually using kubectl as per docs.
+  #This configMap needs to be created by the same user who created the eks cluster in the first place which may not always be possible in many automated scenarios
+  #AWS::EKS::Cluster also doesn't support some extra configuration e.g. Access Options for the api server and cloudwatch logging
+  #which needs to be done manually using cli or sdk.
+  #EKSCluster custom resource, uses a role to create the eks cluster and later uses the same role to create the configMap
+  #required to allows nodes to communicate with eks cluster through an ec2 instance called K8sClient.
+  #It also faciliates different access modes where API Server can be made fully public, half public, fully private.
+  #This would also allow us to add service account to eks so that it can be used elsewhere outside the cluster or aws . e.g. in cicd tool.
+  #However, attributes such as Arn,Endpoint,OidcIssuer etc are not available on a single execution of lambda.
+  #It also allows logging to be configured for api server with cloudwatch.
+  #To understand the access options for eks cluster go to https://docs.aws.amazon.com/eks/latest/userguide/cluster-endpoint.html
+  #EKSCluster requires the following Properties
+  #ClusterConfig:
+  #  Name: Name to be given to the EKS cluster
+  #  Version: The version of the eks cluster
+  #  RoleArn: The arn of the iam role required for eks cluster to function
+  #  SecurityGroupIds: List of security group IDs for eks cluster.
+  #  PrivateSubnets: List of private subnets. These subnets will be tagged as required to allow elb-ingress-controllers to work properly.
+  #  PublicSubnets: List of public subnets. These subnets will be tagged as required to allow elg-ingress-controllers to work properly.
+  #  EndpointPublicAccess: Boolean. Whether API server should be accessible from the internet using valid RBAC.
+  #  EndpointPrivateAccess: Boolean. Whether API server will be accessible from within the VPC.
+  #  SubnetIds: A list of subnet ids. Include both public and private subnets. Public ones are required for creating a public endpoint using public elbs.
+  #
+  #The following is the expected output properties: Arn, Endpoint, CertificateAuthorityData, OidcIssuer. However they are not available through GetAtt function
+  #since the first execution of the lambda to create the cluster doesn't make them available.
+  EKSCluster:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !GetAtt "EksFunc.Arn"
+      ClusterConfig:
+        Name: !Sub "${AppName}-${StageName}-EksCluster"
+        Version: !Sub "{{resolve:ssm:/me/${StageName}/eks/eksversion:1}}"
+        RoleArn: !GetAtt EksServiceRole.Arn
+        EndpointPublicAccess: !Sub "{{resolve:ssm:/me/${StageName}/eks/endpointpublicaccess:1}}"
+        EndpointPrivateAccess: !Sub "{{resolve:ssm:/me/${StageName}/eks/endpointprivateaccess:1}}"
+        SecurityGroupIds:
+          - !GetAtt EksClusterSG.GroupId
+        PrivateSubnets:
+          - !Sub "{{resolve:ssm:/me/${StageName}/common/privatesubnetA:1}}"
+          - !Sub "{{resolve:ssm:/me/${StageName}/common/privatesubnetB:1}}"
+          - !Sub "{{resolve:ssm:/me/${StageName}/common/privatesubnetC:1}}"
+        PublicSubnets:
+          - !Sub "{{resolve:ssm:/me/${StageName}/common/publicsubnetA:1}}"
+          - !Sub "{{resolve:ssm:/me/${StageName}/common/publicsubnetB:1}}"
+          - !Sub "{{resolve:ssm:/me/${StageName}/common/publicsubnetC:1}}"
+
+  #Role to be used by nodes to communicate with eks cluster etc.
+  #added eks list cluster permisssion additionally to wait for cluster to come in to ACTIVE state
+  #since the nodes shouldn't be joining the cluster before it becomes ACTIVE.
+  NodeInstanceRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+      Policies:
+        - PolicyName: "NodeEksDescribeClusterPolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ClusterCreateAccess
+                Action:
+                  - eks:DescribeCluster
+                  - eks:ListClusters
+                Effect: Allow
+                Resource: !Sub "arn:aws:eks:${AWS::Region}:${AWS::AccountId}:cluster/${AppName}-${StageName}-EksCluster"
+        - PolicyName: "ALBIngressControllerIAMPolicy" #this is required for creating ingress of type alb https://docs.aws.amazon.com/eks/latest/userguide/alb-ingress.html
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - acm:DescribeCertificate
+                  - acm:ListCertificates
+                  - acm:GetCertificate
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ec2:AuthorizeSecurityGroupIngress
+                  - ec2:CreateSecurityGroup
+                  - ec2:CreateTags
+                  - ec2:DeleteTags
+                  - ec2:DeleteSecurityGroup
+                  - ec2:DescribeAccountAttributes
+                  - ec2:DescribeAddresses
+                  - ec2:DescribeInstances
+                  - ec2:DescribeInstanceStatus
+                  - ec2:DescribeInternetGateways
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DescribeSubnets
+                  - ec2:DescribeTags
+                  - ec2:DescribeVpcs
+                  - ec2:ModifyInstanceAttribute
+                  - ec2:ModifyNetworkInterfaceAttribute
+                  - ec2:RevokeSecurityGroupIngress
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - elasticloadbalancing:AddListenerCertificates
+                  - elasticloadbalancing:AddTags
+                  - elasticloadbalancing:CreateListener
+                  - elasticloadbalancing:CreateLoadBalancer
+                  - elasticloadbalancing:CreateRule
+                  - elasticloadbalancing:CreateTargetGroup
+                  - elasticloadbalancing:DeleteListener
+                  - elasticloadbalancing:DeleteLoadBalancer
+                  - elasticloadbalancing:DeleteRule
+                  - elasticloadbalancing:DeleteTargetGroup
+                  - elasticloadbalancing:DeregisterTargets
+                  - elasticloadbalancing:DescribeListenerCertificates
+                  - elasticloadbalancing:DescribeListeners
+                  - elasticloadbalancing:DescribeLoadBalancers
+                  - elasticloadbalancing:DescribeLoadBalancerAttributes
+                  - elasticloadbalancing:DescribeRules
+                  - elasticloadbalancing:DescribeSSLPolicies
+                  - elasticloadbalancing:DescribeTags
+                  - elasticloadbalancing:DescribeTargetGroups
+                  - elasticloadbalancing:DescribeTargetGroupAttributes
+                  - elasticloadbalancing:DescribeTargetHealth
+                  - elasticloadbalancing:ModifyListener
+                  - elasticloadbalancing:ModifyLoadBalancerAttributes
+                  - elasticloadbalancing:ModifyRule
+                  - elasticloadbalancing:ModifyTargetGroup
+                  - elasticloadbalancing:ModifyTargetGroupAttributes
+                  - elasticloadbalancing:RegisterTargets
+                  - elasticloadbalancing:RemoveListenerCertificates
+                  - elasticloadbalancing:RemoveTags
+                  - elasticloadbalancing:SetIpAddressType
+                  - elasticloadbalancing:SetSecurityGroups
+                  - elasticloadbalancing:SetSubnets
+                  - elasticloadbalancing:SetWebACL
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - iam:CreateServiceLinkedRole
+                  - iam:GetServerCertificate
+                  - iam:ListServerCertificates
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - waf-regional:GetWebACLForResource
+                  - waf-regional:GetWebACL
+                  - waf-regional:AssociateWebACL
+                  - waf-regional:DisassociateWebACL
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - tag:GetResources
+                  - tag:TagResources
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - waf:GetWebACL
+                Resource: "*"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy"
+        - "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
+        - "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
+      Path: /
+      RoleName: !Sub "${StageName}-NodeInstanceRole-${AWS::Region}"
+
+  #instance profile with nodeinstance role
+  NodeInstanceProfile:
+    Type: "AWS::IAM::InstanceProfile"
+    Properties:
+      Path: /
+      Roles:
+        - !Ref "NodeInstanceRole"
+
+  #profile to be used by k8sclient ec2 instance
+  K8sClientProfile:
+    Type: "AWS::IAM::InstanceProfile"
+    Properties:
+      Path: /
+      Roles:
+        - !Ref "K8sClientRole"
+
+  NodeSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: Security group for all nodes in the cluster
+      Tags:
+        - Key: !Sub "kubernetes.io/cluster/${AppName}-${StageName}-EksCluster"
+          Value: owned
+      VpcId: !Sub "{{resolve:ssm:/me/${StageName}/common/vpcid:1}}"
+  NodeSecurityGroupIngress:
+    Type: "AWS::EC2::SecurityGroupIngress"
+    DependsOn: NodeSecurityGroup
+    Properties:
+      Description: Allow node to communicate with each other
+      FromPort: 0
+      GroupId: !Ref NodeSecurityGroup
+      IpProtocol: "-1"
+      SourceSecurityGroupId: !Ref NodeSecurityGroup
+      ToPort: 65535
+  ClusterControlPlaneSecurityGroupIngress:
+    Type: "AWS::EC2::SecurityGroupIngress"
+    DependsOn: NodeSecurityGroup
+    Properties:
+      Description: Allow pods to communicate with the cluster API Server
+      FromPort: 443
+      GroupId: !GetAtt EksClusterSG.GroupId
+      IpProtocol: tcp
+      #SourceSecurityGroupId: !Ref NodeSecurityGroup
+      CidrIp: !Sub "{{resolve:ssm:/me/${StageName}/common/vpccidr:1}}"
+      ToPort: 443
+  ControlPlaneEgressToNodeSecurityGroup:
+    Type: "AWS::EC2::SecurityGroupEgress"
+    DependsOn: NodeSecurityGroup
+    Properties:
+      Description: Allow the cluster control plane to communicate with worker Kubelet and pods
+      DestinationSecurityGroupId: !Ref NodeSecurityGroup
+      FromPort: 1025
+      GroupId: !GetAtt EksClusterSG.GroupId
+      IpProtocol: tcp
+      ToPort: 65535
+  ControlPlaneEgressToNodeSecurityGroupOn443:
+    Type: "AWS::EC2::SecurityGroupEgress"
+    DependsOn: NodeSecurityGroup
+    Properties:
+      Description: Allow the cluster control plane to communicate with pods running extension API servers on port 443
+      DestinationSecurityGroupId: !Ref NodeSecurityGroup
+      FromPort: 443
+      GroupId: !GetAtt EksClusterSG.GroupId
+      IpProtocol: tcp
+      ToPort: 443
+  NodeSecurityGroupFromControlPlaneIngress:
+    Type: "AWS::EC2::SecurityGroupIngress"
+    DependsOn: NodeSecurityGroup
+    Properties:
+      Description: Allow worker Kubelets and pods to receive communication from the cluster control plane
+      FromPort: 1025
+      GroupId: !Ref NodeSecurityGroup
+      IpProtocol: tcp
+      SourceSecurityGroupId: !GetAtt EksClusterSG.GroupId
+      ToPort: 65535
+  NodeSecurityGroupFromControlPlaneOn443Ingress:
+    Type: "AWS::EC2::SecurityGroupIngress"
+    DependsOn: NodeSecurityGroup
+    Properties:
+      Description: Allow pods running extension API servers on port 443 to receive communication from cluster control plane
+      FromPort: 443
+      GroupId: !Ref NodeSecurityGroup
+      IpProtocol: tcp
+      SourceSecurityGroupId: !GetAtt EksClusterSG.GroupId
+      ToPort: 443
+
+  #security group to access k8sclient machine
+  SshAccessSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Join
+        - "-"
+        - - K8sclient
+          - !Ref "StageName"
+      GroupDescription: security group to access k8s client ec2 machine
+      SecurityGroupIngress:
+        - CidrIp: "0.0.0.0/0" #!Sub '{{resolve:ssm:/me/${StageName}/common/vpccidr:1}}'
+          FromPort: "22"
+          IpProtocol: tcp
+          ToPort: "22"
+      VpcId: !Sub "{{resolve:ssm:/me/${StageName}/common/vpcid:1}}"
+
+  #Node launch config and autoscaling groups. userdata first waits for the cluster to become active for 20 minutes before proceeding.
+  NodeLaunchConfig:
+    Type: "AWS::AutoScaling::LaunchConfiguration"
+    DependsOn:
+      - EKSCluster #should create the nodes only after the cluster is successfully up.
+    Properties:
+      AssociatePublicIpAddress: "true"
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            DeleteOnTermination: true
+            VolumeSize: !Sub "{{resolve:ssm:/me/${StageName}/eks/nodevolumesize:1}}"
+            VolumeType: gp2
+      IamInstanceProfile: !Ref NodeInstanceProfile
+      ImageId: !Ref NodeImageIdSSMParam
+      InstanceType: !Sub "{{resolve:ssm:/me/${StageName}/eks/nodeinstancetype:1}}"
+      KeyName: !Sub "{{resolve:ssm:/me/${StageName}/common/keypair:1}}"
+      SecurityGroups:
+        - !Ref "NodeSecurityGroup"
+      UserData: !Base64
+        "Fn::Sub": |
+          #!/bin/bash
+          yum update -y
+          a=0
+          while [ $(aws eks describe-cluster --name ${AppName}-${StageName}-EksCluster --region ${AWS::Region} | grep '"status": "ACTIVE"' | wc -l) -eq 0 ]
+          do
+            echo "waiting for cluster to become active"
+            sleep 60
+            if [ $a -eq 20 ]
+              then
+                echo "waited for too long (20 min), exiting"
+                break
+            fi
+            a=`expr $a + 1`
+          done
+          set -o xtrace
+          /etc/eks/bootstrap.sh ${AppName}-${StageName}-EksCluster ${BootstrapArguments}
+          /opt/aws/bin/cfn-signal --exit-code $? \
+                   --stack  ${AWS::StackName} \
+                   --resource NodeGroup  \
+                   --region ${AWS::Region}
+
+  NodeGroup:
+    Type: "AWS::AutoScaling::AutoScalingGroup"
+    DependsOn:
+      - EKSCluster
+    Properties:
+      DesiredCapacity: !Sub "{{resolve:ssm:/me/${StageName}/eks/nodedesiredcapacity:1}}"
+      LaunchConfigurationName: !Ref NodeLaunchConfig
+      MaxSize: !Sub "{{resolve:ssm:/me/${StageName}/eks/nodeminsize:1}}"
+      MinSize: !Sub "{{resolve:ssm:/me/${StageName}/eks/nodemaxsize:1}}"
+      Tags:
+        - Key: Name
+          PropagateAtLaunch: "true"
+          Value: !Sub "${AppName}-${StageName}-EksCluster-EksNodeAG"
+        - Key: !Sub "kubernetes.io/cluster/${AppName}-${StageName}-EksCluster"
+          PropagateAtLaunch: "true"
+          Value: owned
+      VPCZoneIdentifier:
+        - !Sub "{{resolve:ssm:/me/${StageName}/common/privatesubnetA:1}}"
+        - !Sub "{{resolve:ssm:/me/${StageName}/common/privatesubnetB:1}}"
+        - !Sub "{{resolve:ssm:/me/${StageName}/common/privatesubnetC:1}}"
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MaxBatchSize: "1"
+        MinInstancesInService: !Sub "{{resolve:ssm:/me/${StageName}/eks/nodedesiredcapacity:1}}"
+        PauseTime: PT5M
+    CreationPolicy:
+      ResourceSignal:
+        Count: 1
+        Timeout: PT25M
+
+  #K8sClient instance to create the configMap after creating the eks cluster and nodes, without which the nodes can't talk to the cluster.
+  #It also creates necessary objects for alb-ingress-controller
+  #It creates a service account that can be used to access eks cluster from the outside
+  #Plus the instance serves as a bastion host for connecting to eks using kubectl for easy troubleshooting and whatnot.
+  K8sClient:
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - NodeGroup
+    CreationPolicy:
+      ResourceSignal:
+        Count: 1
+        Timeout: PT15M
+    Properties:
+      KeyName: !Sub "{{resolve:ssm:/me/${StageName}/common/keypair:1}}"
+      ImageId: !Sub "{{resolve:ssm:/me/${StageName}/common/amznlinux2x86ami:1}}"
+      InstanceType: t2.small #choosing t2.small by default
+      IamInstanceProfile: !Ref "K8sClientProfile"
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            DeleteOnTermination: true
+            VolumeSize: 80
+            VolumeType: gp2
+      SecurityGroupIds:
+        #- !Ref 'NodeSecurityGroup'
+        - !Ref "SshAccessSG"
+      SubnetId: !Sub "{{resolve:ssm:/me/${StageName}/common/privatesubnetA:1}}"
+      UserData: !Base64
+        Fn::Sub: |
+          #!/bin/bash -xe
+          set -eu
+          yum update -y
+          yum install -y aws-cfn-bootstrap
+
+
+
+          ## Cluster is Active now. Downloading kubectl and aws-iam-authenticator
+          HOME="/root"
+          curl -o kubectl https://amazon-eks.s3-us-west-2.amazonaws.com/1.14.6/2019-08-22/bin/linux/amd64/kubectl
+          chmod +x ./kubectl
+          mkdir -p $HOME/bin && cp ./kubectl $HOME/bin/kubectl && export PATH=$HOME/bin:$PATH
+          echo 'export PATH=$HOME/bin:$PATH' >> ~/.bashrc
+          curl -o aws-iam-authenticator https://amazon-eks.s3-us-west-2.amazonaws.com/1.14.6/2019-08-22/bin/linux/amd64/aws-iam-authenticator
+          chmod +x ./aws-iam-authenticator
+          mkdir -p $HOME/bin && cp ./aws-iam-authenticator $HOME/bin/aws-iam-authenticator && export PATH=$HOME/bin:$PATH
+
+
+
+          ## Creating kubeconfig file
+          ## update-kubeconfig should use role-arn if needed to make sure the default role that created eks cluster is not used while using kubectl
+          aws eks --region ${AWS::Region} update-kubeconfig --name ${AppName}-${StageName}-EksCluster
+          export KUBECONFIG="$HOME/.kube/config"
+
+
+          #subsequent operations will be done under /tmp
+          cd /tmp
+
+
+          ## Creating a ConfigMap to allow nodes to communicate with eks cluster
+          aws s3 cp s3://${S3Bucket}/${S3Prefix}/_kube . --recursive
+          sed -i 's|REPLACE_ARN|arn:aws:iam::${AWS::AccountId}:role/${NodeInstanceRole}|g' aws-auth-cm.yaml
+          kubectl apply -f ./aws-auth-cm.yaml >> /tmp/k8soutput.txt
+
+
+
+          ## Creating Objects necessary for elb-ingress-controller
+          kubectl apply -f ./rbac-role-alb-ingress.yaml >> /tmp/k8soutput.txt
+          vpcId=$(aws ssm get-parameter --name /me/${StageName}/common/vpcid --output text --query Parameter.Value --region ${AWS::Region})
+          sed -i 's|K8S_CLUSTER_NAME|${AppName}-${StageName}-EksCluster|g' alb-ingress-controller.yaml
+          sed -i "s|K8S_VPC_ID|$vpcId|g" alb-ingress-controller.yaml
+          sed -i 's|K8S_REGION|${AWS::Region}|g' alb-ingress-controller.yaml
+          kubectl apply -f ./alb-ingress-controller.yaml >> /tmp/k8soutput.txt
+
+
+          ## Optional: Any application specific kubernetes files inside folder ${StageName} will be applied now, alphabetically if that helps for any sort of order.
+          if [ -d ./${StageName} ];then
+            if [ $(ls ./${StageName} | wc -l) -gt 0 ];then
+              for i in $(ls ./${StageName})
+                do
+                  kubectl apply -f ./${StageName}/$i >> /tmp/k8soutput.txt
+                  if [ $? != 0 ];then
+                    echo "could not apply $i" >> /tmp/k8soutput.txt
+                    break
+                  fi
+                done
+            fi
+          fi
+
+
+
+
+          #create a service account and then create a kubeconfig file. Which can be used to connect to the api server outside of the cluster.
+          kubectl create sa deployer
+          kubectl create clusterrolebinding deployer --clusterrole cluster-admin --serviceaccount default:deployer
+          KUBE_DEPLOY_SECRET_NAME=`kubectl get sa deployer -o jsonpath='{.secrets[0].name}'`
+          KUBE_API_EP=$(kubectl config view --minify | grep server | cut -f 2- -d ":" | tr -d " ")
+          KUBE_API_TOKEN=`kubectl get secret $KUBE_DEPLOY_SECRET_NAME -o jsonpath='{.data.token}'|base64 --decode`
+          KUBE_API_CA=`kubectl get secret $KUBE_DEPLOY_SECRET_NAME -o jsonpath='{.data.ca\.crt}'|base64 --decode`
+          echo $KUBE_API_CA > tmp.deploy.ca.crt
+          export KUBECONFIG=./kubeconfig
+          kubectl config set-cluster k8s --server=$KUBE_API_EP --certificate-authority=tmp.deploy.ca.crt --embed-certs=true
+          kubectl config set-credentials k8s-deployer --token=$KUBE_API_TOKEN
+          kubectl config set-context k8s --cluster k8s --user k8s-deployer
+          kubectl config use-context k8s
+          rm tmp.deploy.ca.crt
+
+
+
+          ## uploading kubeconfig for use in
+          aws s3 cp $KUBECONFIG s3://${S3Bucket}/${RepositoryName}/${StageName}/kubeconfig
+
+          ## create is complete now
+          /opt/aws/bin/cfn-signal --exit-code $? \
+                             --stack  ${AWS::StackName} \
+                             --resource K8sClient  \
+                             --region ${AWS::Region}
+
+      Tags:
+        - Key: Name
+          Value: !Sub "${RepositoryName}-${StageName}-k8sclient"
+
+Outputs:
+  EksClusterName:
+    Value: !Sub "${AppName}-${StageName}-EksCluster"
+  EksClusterNodeInstanceRole:
+    Value: !Ref NodeInstanceRole
+    Export:
+      Name: !Sub "${AWS::StackName}-NodeInstanceRole"
+  EksClientRole:
+    Value: !Ref K8sClientRole
+    Export:
+      Name: !Sub "${AWS::StackName}-K8sClientRole"
+  K8sClientInstance:
+    Value: !Ref K8sClient

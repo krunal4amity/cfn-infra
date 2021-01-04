@@ -1,0 +1,142 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: gitlab runner. Create a runner per stage e.g dev|stg|prd|qa and tags them accordingly.
+Parameters:
+  S3Bucket:
+    Type: String
+  S3Prefix:
+    Type: String
+  RepositoryName:
+    Type: String
+  StageName:
+    Type: String
+  GitLabServer:
+    Description: Address of GitLab Web Server application
+    Type: String
+    Default: "gitlab.com"
+  GitLabRunnerToken:
+    Description: Registration token for GitLab Runner. # gitlab group token would allow all the child projects to use the runner.
+    Type: String
+    Default: KVCDLfsSEduJrpbEWEm1 # Replace this during runtime with an actual token. Use a gitlab group's token under which teams repos live.
+Resources:
+  GitlabIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: S3BucketAccess
+                Action:
+                  - s3:ListBucket
+                Effect: Allow
+                Resource:
+                  - !Sub "arn:aws:s3:::${S3Bucket}"
+              - Sid: SecretMangerAccess
+                Action:
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:ListSecretVersionIds
+                  - secretsmanager:ListSecrets
+                Effect: Allow
+                Resource: "*"
+              - Sid: S3BucketObjectAccess
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:PutObject
+                Effect: Allow
+                Resource:
+                  - !Sub "arn:aws:s3:::${S3Bucket}/*"
+              - Sid: AccessToKMSCustomKeys
+                Action:
+                  - "kms:Describe*"
+                  - "kms:Get*"
+                  - "kms:List*"
+                  - "kms:Decrypt"
+                Effect: Allow
+                Resource: "*"
+          PolicyName: !Sub "Gitlab-Runner-${StageName}-IamPolicy"
+      Path: /
+
+  GitlabIamProfile:
+    Type: "AWS::IAM::InstanceProfile"
+    Properties:
+      Path: /
+      Roles:
+        - !Ref "GitlabIamRole"
+
+  GitlabRunner:
+    Type: AWS::EC2::Instance
+    CreationPolicy:
+      ResourceSignal:
+        Count: 1
+        Timeout: PT15M
+    Properties:
+      KeyName: !Sub "{{resolve:ssm:/me/${StageName}/common/keypair:1}}"
+      ImageId: !Sub "{{resolve:ssm:/me/${StageName}/common/amznlinux2x86ami:1}}"
+      InstanceType: t2.medium
+      IamInstanceProfile: !Ref "GitlabIamProfile"
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            DeleteOnTermination: true
+            VolumeSize: 80
+            VolumeType: gp2
+      SecurityGroupIds:
+        - !Ref "InstanceSecurityGroup"
+      SubnetId: !Sub "{{resolve:ssm:/me/${StageName}/common/privatesubnetA:1}}"
+      UserData: !Base64
+        Fn::Sub: |
+          #!/bin/bash -xe
+          set -eu
+          yum update -y
+          yum install -y aws-cfn-bootstrap
+          yum install curl -y
+          amazon-linux-extras install docker -y
+          service docker start
+          usermod -a -G docker ec2-user
+          curl -L --output /usr/bin/gitlab-runner https://gitlab-runner-downloads.s3.amazonaws.com/latest/binaries/gitlab-runner-linux-amd64
+          chmod +x /usr/bin/gitlab-runner
+          useradd --comment 'GitLab Runner' --create-home gitlab-runner --shell /bin/bash
+          gitlab-runner install --user=gitlab-runner --working-directory=/home/gitlab-runner
+
+          gitlab-runner register \
+            --non-interactive \
+            --url "https://${GitLabServer}" \
+            --registration-token "${GitLabRunnerToken}" \
+            --executor "docker" \
+            --docker-image ubuntu:latest \
+            --description "my-${StageName}-${RepositoryName}" \
+            --tag-list "my-${StageName}" \
+            --run-untagged="false" \
+            --locked="false" \
+            --access-level="not_protected"
+
+          gitlab-runner start
+          /opt/aws/bin/cfn-signal --exit-code $? \
+                             --stack  ${AWS::StackName} \
+                             --resource GitlabRunner  \
+                             --region ${AWS::Region}
+
+      Tags:
+        - Key: Name
+          Value: !Sub "Gitlab-Runner-${StageName}-${RepositoryName}"
+
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Sub "{{resolve:ssm:/me/${StageName}/common/vpcid:1}}"
+      GroupDescription: Enable SSH access from Bastion via port 22
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: "22"
+          ToPort: "22"
+          CidrIp: !Sub "{{resolve:ssm:/me/${StageName}/common/vpccidr:1}}"

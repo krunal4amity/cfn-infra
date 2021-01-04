@@ -1,0 +1,489 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Kafka cluster
+#The following are the pre-requisites before deploying this template
+# - Ensure a VPC exists with mininum 3 subnets in different regions
+# - Ensure a keypair exists beforehand to create schemareg autoscaling group.
+# - Ensure that the following configuration exists in secretmanager or ssm.
+
+Parameters:
+  ClientBrokerCommProtocol:
+    Type: String
+    AllowedValues:
+      - TLS
+      - TLS_PLAINTEXT
+    Default: TLS
+    Description: if TLS, enables one-way authentication in which client authenticates the service certificate.
+  VolumeSize:
+    Type: String
+    Default: "100"
+    Description: the ebs volume size
+  S3Bucket:
+    Type: String
+  S3Prefix:
+    Type: String
+  StageName:
+    Type: String
+#Condition that decides whether the given environment is production or non-production
+#to be used in conditional resource creation and resource naming.
+#Mind that the name of the stagename should be prd (lowercase and not PROD or prod)
+Conditions:
+  IsProd: !Equals
+    - !Ref "StageName"
+    - prd
+Resources:
+  KafkaSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Join
+        - "-"
+        - - KafkaSG
+          - !Ref "StageName"
+      GroupDescription: security group to access MSK
+      SecurityGroupIngress:
+        - CidrIp: "0.0.0.0/0" #todo need to confirm on cidrIP. If the cluster is to be accessible from varied ranges, probably 0.0.0.0/0 is okay.
+          FromPort: "2181"
+          IpProtocol: tcp
+          ToPort: "2181"
+        - CidrIp: "0.0.0.0/0"
+          FromPort: "9092"
+          IpProtocol: tcp
+          ToPort: "9092"
+        - CidrIp: "0.0.0.0/0"
+          FromPort: "9094"
+          IpProtocol: tcp
+          ToPort: "9094"
+      VpcId: !Sub "{{resolve:ssm:/me/${StageName}/common/vpcid:1}}"
+  SchemaRegSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Join
+        - "-"
+        - - SchemaRegSG
+          - !Ref "StageName"
+      GroupDescription: security group to access MSK
+      SecurityGroupIngress:
+        - CidrIp: !Sub "{{resolve:ssm:/me/${StageName}/common/vpccidr:1}}"
+          FromPort: "8081"
+          IpProtocol: tcp
+          ToPort: "8081"
+        - CidrIp: !Sub "{{resolve:ssm:/me/${StageName}/common/vpccidr:1}}"
+          FromPort: "22"
+          IpProtocol: tcp
+          ToPort: "22"
+      VpcId: !Sub "{{resolve:ssm:/me/${StageName}/common/vpcid:1}}"
+  SchemaRegElbSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Join
+        - "-"
+        - - SchemaRegElbSG
+          - !Ref "StageName"
+      GroupDescription: security group to access MSK
+      SecurityGroupIngress:
+        - CidrIp: "0.0.0.0/0"
+          FromPort: "8081"
+          IpProtocol: tcp
+          ToPort: "8081"
+      VpcId: !Sub "{{resolve:ssm:/me/${StageName}/common/vpcid:1}}"
+  KafkaCluster:
+    Type: AWS::MSK::Cluster
+    Properties:
+      BrokerNodeGroupInfo:
+        ClientSubnets:
+          - !Sub "{{resolve:ssm:/me/${StageName}/common/privatesubnetA:1}}"
+          - !Sub "{{resolve:ssm:/me/${StageName}/common/privatesubnetB:1}}"
+          - !Sub "{{resolve:ssm:/me/${StageName}/common/privatesubnetC:1}}"
+        InstanceType: !Sub "{{resolve:ssm:/me/${StageName}/msk/kafkasize:1}}"
+        SecurityGroups:
+          - !Ref "KafkaSG"
+        StorageInfo:
+          EBSStorageInfo:
+            VolumeSize: !Sub "{{resolve:ssm:/me/${StageName}/msk/mskebsvolsize:1}}"
+      ConfigurationInfo:
+        Arn: !GetAtt "KafkaPreProcessor.ConfigurationArn"
+        Revision: "1" # Choosing version 1 only
+      ClusterName: !Join
+        - "-"
+        - - Kafka
+          - !Ref "StageName"
+      EncryptionInfo:
+        EncryptionInTransit:
+          ClientBroker: !Ref "ClientBrokerCommProtocol"
+          InCluster: "true"
+      EnhancedMonitoring: DEFAULT
+      KafkaVersion: !Sub "{{resolve:ssm:/me/${StageName}/msk/kafkaversion:1}}"
+      NumberOfBrokerNodes: !Sub "{{resolve:ssm:/me/${StageName}/msk/numofbrokers:1}}"
+    DependsOn:
+      - KafkaPreProcessor
+      - PostProcessorFunc
+  PreProcessorFuncRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: Stmt1568801387563
+                Action:
+                  - kafka:CreateConfiguration
+                  - kafka:DescribeConfiguration
+                  - kafka:DescribeConfigurationRevision
+                  - kafka:ListConfigurations
+                Effect: Allow
+                Resource: !Join
+                  - ":"
+                  - - arn
+                    - aws
+                    - kafka
+                    - !Ref "AWS::Region"
+                    - !Ref "AWS::AccountId"
+                    - /v1/configurations
+          PolicyName: !Join
+            - "-"
+            - - LambdaAccessToMSKConfigPolicy
+              - !Ref "StageName"
+        - PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: Stmt1568801387564
+                Action:
+                  - ec2:Describe*
+                Effect: Allow
+                Resource: "*"
+          PolicyName: !Join
+            - "-"
+            - - LambdaAccessToVpcPolicy
+              - !Ref "StageName"
+      RoleName: !Join
+        - "-"
+        - - MSKPrePRocessRole
+          - !Ref "StageName"
+  PostProcessorFuncRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+        - arn:aws:iam::aws:policy/AmazonMSKReadOnlyAccess
+        - arn:aws:iam::aws:policy/AmazonRoute53ReadOnlyAccess
+      RoleName: !Join
+        - "-"
+        - - MSKPostProcessRole
+          - !Ref "StageName"
+  PreProcessorFunc:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        S3Bucket: !Ref "S3Bucket"
+        S3Key: !Join
+          - "/"
+          - - !Ref "S3Prefix"
+            - preprocesskafka.zip
+      Handler: main
+      Role: !GetAtt "PreProcessorFuncRole.Arn"
+      Runtime: go1.x
+  PostProcessorFunc:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        S3Bucket: !Ref "S3Bucket"
+        S3Key: !Join
+          - "/"
+          - - !Ref "S3Prefix"
+            - postprocesskafka.zip
+      Handler: main
+      Role: !GetAtt "PostProcessorFuncRole.Arn"
+      Runtime: go1.x
+      Timeout: "20"
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref "KafkaSG"
+        SubnetIds:
+          - !Sub "{{resolve:ssm:/me/${StageName}/common/privatesubnetA:1}}"
+          - !Sub "{{resolve:ssm:/me/${StageName}/common/privatesubnetB:1}}"
+          - !Sub "{{resolve:ssm:/me/${StageName}/common/privatesubnetC:1}}"
+  #KafkaPreProcessor takes care of creating kafka configuration so that kafka cluster can use it while spinning up. It
+  #also returns a VpcCidr property of the given VPC which can be used in the SecurityGroup that kafka cluster will be using.
+  #This custom resource has the following Custom properties
+  #VpcId : String. supplied as a parameter
+  #ClusterConfig : Object. {Name:"String. name of the config",Description : "String. description",Kafka_Versions: List of strings,....
+  #....ServerProperties: A list of properties. Recommended not to leave any spaces before and after "=".
+  #Allowed server properties are available here : https://docs.aws.amazon.com/msk/latest/developerguide/msk-configuration-properties.html
+  #Kafka Configuration can be created in isolation but can be updated only for a specific cluster and cannot be deleted as of now.
+  KafkaPreProcessor:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !GetAtt "PreProcessorFunc.Arn"
+      VpcId: !Sub "{{resolve:ssm:/me/${StageName}/common/vpcid:1}}"
+      ClusterConfig:
+        Name: !Join
+          - "-"
+          - - MSKClusterConfig
+            - !Ref "StageName"
+        Description: Kafka Cluster configuration
+        Kafka_Versions:
+          - 1.1.1
+          - 2.2.1
+      ServerProperties: #todo consider what to put here.
+        - delete.topic.enable=true
+        - num.partitions=5
+        - log.retention.hours=168
+        - log.segment.bytes=1073741824
+        - zookeeper.connection.timeout.ms=6000
+        - unclean.leader.election.enable=true
+  #KafkaPostProcessor takes care of doing some post processing once kafka cluster is created.
+  #e.g. create topics on kafka cluster,
+  #It takes the following properties:
+  #HostedZone: String (supplied as a parameter)
+  #ClusterArn: String, arn of the kafka cluster
+  #TopicList : List of objects of type Topic
+  #Topic : {Name: "topic name",ReplicationFactor:"string. number specifying it.",NumOfPartitions:"string. number specifying it"}
+  KafkaPostProcessor:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !GetAtt "PostProcessorFunc.Arn"
+      ClusterArn: !Ref "KafkaCluster"
+      HostedZone: !Sub "{{resolve:ssm:/me/${StageName}/common/privater53zoneid:1}}"
+      TopicList: #todo need to decide on the values for repfactor and numOfPartition here later.
+        - Name: !Join
+            - "-"
+            - - !Ref "StageName"
+              - dataplatformSparkJobRequest
+          ReplicationFactor: "3"
+          NumOfPartitions: "1"
+        - Name: !Join
+            - "-"
+            - - !Ref "StageName"
+              - ResourceEventTrackingRequest
+          ReplicationFactor: "3"
+          NumOfPartitions: "1"
+        - Name: !Join
+            - "-"
+            - - !Ref "StageName"
+              - dataplatformDownloadRequest
+          ReplicationFactor: "3"
+          NumOfPartitions: "1"
+        - Name: !Join
+            - "-"
+            - - !Ref "StageName"
+              - dataplatformPreviewRequest
+          ReplicationFactor: "3"
+          NumOfPartitions: "1"
+        - Name: !Join
+            - "-"
+            - - !Ref "StageName"
+              - dataplatformUpdateSummaryTotalsRequest
+          ReplicationFactor: "3"
+          NumOfPartitions: "1"
+        - Name: !Join
+            - "-"
+            - - !Ref "StageName"
+              - dataplatformUpdateSummaryPerFieldRequest
+          ReplicationFactor: "3"
+          NumOfPartitions: "1"
+        - Name: !Join
+            - "-"
+            - - !Ref "StageName"
+              - ApprovalPageManagerServiceRequest
+          ReplicationFactor: "3"
+          NumOfPartitions: "1"
+        - Name: !Join
+            - "-"
+            - - !Ref "StageName"
+              - SparkJobManagerServiceRequest
+          ReplicationFactor: "3"
+          NumOfPartitions: "1"
+        - Name: !Join
+            - "-"
+            - - !Ref "StageName"
+              - ResourceEventTrackingRequest
+          ReplicationFactor: "3"
+          NumOfPartitions: "1"
+        - Name: !Join
+            - "-"
+            - - !Ref "StageName"
+              - EventActionMonitorRequest
+          ReplicationFactor: "3"
+          NumOfPartitions: "1"
+  ZookeeperRecordSet:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      Comment: Bootstrap broker connection string
+      HostedZoneId: !Sub "{{resolve:ssm:/me/${StageName}/common/privater53zoneid:1}}"
+      Name: !Join
+        - ""
+        - - dataplatform-zookeepers-
+          - !Ref "StageName"
+          - "."
+          - !GetAtt "KafkaPostProcessor.ZoneName"
+      ResourceRecords: !Split
+        - ","
+        - !GetAtt "KafkaPostProcessor.Zookeepers"
+      TTL: "900"
+      Type: A
+  SchemaRegLC:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    DependsOn:
+      - KafkaCluster
+    Properties:
+      AssociatePublicIpAddress: "false"
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: "150"
+            VolumeType: gp2
+      ImageId: !Sub "{{resolve:ssm:/me/${StageName}/common/amznlinux2x86ami:1}}"
+      InstanceType: t2.medium
+      KeyName: !Sub "{{resolve:ssm:/me/${StageName}/common/keypair:1}}"
+      LaunchConfigurationName: !Sub "SchemaRegLC-${StageName}"
+      SecurityGroups:
+        - !Ref "SchemaRegSG"
+      UserData:
+        "Fn::Base64":
+          "Fn::Sub": >-
+            #!/bin/bash -xe
+
+            yum update -y
+
+            yum install -y java
+
+            cd /opt
+
+            curl -O http://packages.confluent.io/archive/5.3/confluent-5.3.1-2.12.zip
+
+            unzip confluent-5.3.1-2.12.zip
+
+            cd confluent-5.3.1/etc/schema-registry
+
+            cat <<EOF >schema-registry.properties
+
+            kafkastore.security.protocol = SSL
+
+            listeners=http://0.0.0.0:8081
+
+            kafkastore.connection.url=${ZookeeperRecordSet}
+
+            kafkastore.bootstrap.servers=${KafkaPostProcessor.Brokers}
+
+            kafkastore.topic=_schemas
+
+            debug=false
+
+            EOF
+
+            cd /opt
+
+            nohup confluent-5.3.1/bin/schema-registry-start confluent-5.3.1/etc/schema-registry/schema-registry.properties &
+  SchemaRegAG:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn:
+      - KafkaCluster
+    Properties:
+      AutoScalingGroupName: !Sub "SchemaRegAG-${StageName}"
+      DesiredCapacity: "2"
+      LaunchConfigurationName: !Ref "SchemaRegLC"
+      MaxSize: "2"
+      MinSize: "2"
+      TargetGroupARNs:
+        - !Ref "SchemaRegTG"
+      VPCZoneIdentifier:
+        - !Sub "{{resolve:ssm:/me/${StageName}/common/privatesubnetA:1}}"
+        - !Sub "{{resolve:ssm:/me/${StageName}/common/privatesubnetB:1}}"
+        - !Sub "{{resolve:ssm:/me/${StageName}/common/privatesubnetC:1}}"
+      Tags:
+        - Key: Name
+          Value: !Sub "SchemaReg-${StageName}"
+          PropagateAtLaunch: "true"
+  SchemaRegELB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    DependsOn:
+      - KafkaCluster
+    Properties:
+      Name: !Sub "SchemaRegELB-${StageName}"
+      Scheme: internal
+      SecurityGroups:
+        - !Ref "SchemaRegSG"
+      Subnets:
+        - !Sub "{{resolve:ssm:/me/${StageName}/common/privatesubnetA:1}}"
+        - !Sub "{{resolve:ssm:/me/${StageName}/common/privatesubnetB:1}}"
+        - !Sub "{{resolve:ssm:/me/${StageName}/common/privatesubnetC:1}}"
+  SchemaRegListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    DependsOn:
+      - KafkaCluster
+    Properties:
+      DefaultActions:
+        - TargetGroupArn: !Ref "SchemaRegTG"
+          Type: forward
+      LoadBalancerArn: !Ref "SchemaRegELB"
+      Port: "8081"
+      Protocol: HTTP
+  SchemaRegTG:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    DependsOn:
+      - KafkaCluster
+    Properties:
+      HealthCheckIntervalSeconds: "180"
+      HealthCheckPath: /subjects
+      HealthCheckPort: "8081"
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: "30"
+      HealthyThresholdCount: "5"
+      Name: !Sub "SchemaRegTG-${StageName}"
+      Port: "8081"
+      Protocol: HTTP
+      UnhealthyThresholdCount: "5"
+      VpcId: !Sub "{{resolve:ssm:/me/${StageName}/common/vpcid:1}}"
+  SchemaRegRecordSet:
+    Type: AWS::Route53::RecordSet
+    DependsOn:
+      - KafkaCluster
+    Properties:
+      AliasTarget:
+        DNSName: !GetAtt "SchemaRegELB.DNSName"
+        EvaluateTargetHealth: "true"
+        HostedZoneId: !GetAtt "SchemaRegELB.CanonicalHostedZoneID"
+      Comment:
+        "Record set to point to Schema Registry component set up on an EC2
+        instance outside of AWS MSK service "
+      HostedZoneId: !Sub "{{resolve:ssm:/me/${StageName}/common/privater53zoneid:1}}"
+      Name: !Join
+        - ""
+        - - dataplatform-schemareg-
+          - !Ref "StageName"
+          - .
+          - !GetAtt "KafkaPostProcessor.ZoneName"
+      Type: A
+Outputs:
+  TLSBrokers:
+    Description: Broker connection string to be used in schema-registry.properties
+    Value: !GetAtt "KafkaPostProcessor.Brokers"
+  Zookeepers:
+    Description: Zookeeper connection string to be used in Route53 record set
+    Value: !GetAtt "KafkaPostProcessor.Zookeepers"
+  SchemaReg:
+    Description: DNS record of Schema registry
+    Value: !Ref SchemaRegRecordSet
+  ZookeeperDns:
+    Description: DNS record of Zookeepers
+    Value: !Ref ZookeeperRecordSet
+  KafkaClusterConfig:
+    Description: ARN of the kafka cluster configuration
+    Value: !GetAtt "KafkaPreProcessor.ConfigurationArn"

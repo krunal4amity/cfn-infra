@@ -1,0 +1,851 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: SSM template
+#The following ssm parameters are being set.
+# ---Common---               #It is assumed that the region is us-west-2
+#  {{resolve:ssm:/me/${StageName}/common/vpcid:1}}
+#  {{resolve:ssm:/me/${StageName}/common/vpccidr:1}}
+#  {{resolve:ssm:/me/${StageName}/common/publicsubnetA:1}}
+#  {{resolve:ssm:/me/${StageName}/common/publicsubnetB:1}}
+#  {{resolve:ssm:/me/${StageName}/common/publicsubnetC:1}}
+#  {{resolve:ssm:/me/${StageName}/common/privatesubnetA:1}}
+#  {{resolve:ssm:/me/${StageName}/common/privatesubnetB:1}}
+#  {{resolve:ssm:/me/${StageName}/common/privatesubnetC:1}}
+#  {{resolve:ssm:/me/${StageName}/common/publicr53domain:1}}
+#  {{resolve:ssm:/me/${StageName}/common/privater53domain:1}}
+#  {{resolve:ssm:/me/${StageName}/common/publicr53zoneid:1}}
+#  {{resolve:ssm:/me/${StageName}/common/privater53zoneid:1}}
+#  {{resolve:ssm:/me/${StageName}/common/keypair:1}}
+#  {{resolve:ssm:/me/${StageName}/common/amznlinux2x86ami:1}}
+#  {{resolve:ssm:/me/${StageName}/common/amznlinuxami:1}}
+#  ---MSK---
+#  {{resolve:ssm:/me/${StageName}/msk/kafkaversion:1}}
+#  {{resolve:ssm:/me/${StageName}/msk/kafkasize:1}}
+#  {{resolve:ssm:/me/${StageName}/msk/numofbrokers:1}}
+#  {{resolve:ssm:/me/${StageName}/msk/mskebsvolsize:1}}
+#  ---RDS---
+#  {{resolve:ssm:/me/${StageName}/rds/instanceclass:1}}
+#  {{resolve:ssm:/me/${StageName}/rds/engine:1}}
+#  {{resolve:ssm:/me/${StageName}/rds/engineversion:1}}
+#  {{resolve:ssm:/me/${StageName}/rds/allocatedstorage:1}}
+#  {{resolve:ssm:/me/${StageName}/rds/preferredbackupwindow:1}}
+#  {{resolve:ssm:/me/${StageName}/rds/preferredmaintenancewindow:1}}
+#  {{resolve:ssm:/me/${StageName}/rds/dbname:1}}
+# ---ES---
+# {{resolve:ssm:/me/${StageName}/es/esinstancetype:1}}
+# {{resolve:ssm:/me/${StageName}/es/esinstancecount:1}}
+# {{resolve:ssm:/me/${StageName}/es/esmasterinstancetype:1}}
+# {{resolve:ssm:/me/${StageName}/es/esversion:1}}
+# {{resolve:ssm:/me/${StageName}/es/esebsvolsize:1}}
+# ---EMR---
+# {{resolve:ssm:/me/${StageName}/emr/emrebsrootvolumesize:1}}
+# {{resolve:ssm:/me/${StageName}/emr/emrreleaselabel:1}}
+# {{resolve:ssm:/me/${StageName}/emr/emrmastertype:1}}
+# {{resolve:ssm:/me/${StageName}/emr/emrmasterebssize:1}}
+# {{resolve:ssm:/me/${StageName}/emr/emrcoretype:1}}
+# {{resolve:ssm:/me/${StageName}/emr/emrcoreebssize:1}}
+# {{resolve:ssm:/me/${StageName}/emr/emrtasktype:1}}
+# {{resolve:ssm:/me/${StageName}/emr/emrtaskebssize:1}}
+# {{resolve:ssm:/me/${StageName}/emr/coremaxcapacity:1}}
+# {{resolve:ssm:/me/${StageName}/emr/coremincapacity:1}}
+# {{resolve:ssm:/me/${StageName}/emr/coreinstancecount:1}}
+# {{resolve:ssm:/me/${StageName}/emr/taskmaxcapacity:1}}
+# {{resolve:ssm:/me/${StageName}/emr/taskmincapacity:1}}
+# {{resolve:ssm:/me/${StageName}/emr/taskinstancecount:1}}
+# ---EKS---
+# {{resolve:ssm:/me/${StageName}/eks/eksversion:1}}
+# {{resolve:ssm:/me/${StageName}/eks/nodevolumesize:1}}
+# {{resolve:ssm:/me/${StageName}/eks/nodeinstancetype:1}}
+# {{resolve:ssm:/me/${StageName}/eks/nodedesiredcapacity:1}}
+# {{resolve:ssm:/me/${StageName}/eks/nodeminsize:1}}
+# {{resolve:ssm:/me/${StageName}/eks/nodemaxsize:1}}
+# {{resolve:ssm:/me/${StageName}/eks/endpointpublicaccess:1}}
+# {{resolve:ssm:/me/${StageName}/eks/endpointprivateaccess:1}}
+# ---Elasticache---
+# {{resolve:ssm:/me/${StageName}/ecache/cachenodetype:1}}
+# {{resolve:ssm:/me/${StageName}/ecache/engineversion:1}}
+Parameters:
+  StageName:
+    Type: String
+    AllowedValues:
+      - dev
+      - qa
+      - stg
+      - prd
+  RepositoryName:
+    Type: String
+Mappings:
+  Common:
+    dev:
+      VpcId: vpc-someid
+      VpcCidr: 10.0.0.0/16
+      PublicSubnetA: subnet-someid
+      PublicSubnetB: subnet-someid
+      PublicSubnetC: subnet-someid
+      PrivateSubnetA: subnet-someid
+      PrivateSubnetB: subnet-someid
+      PrivateSubnetC: subnet-someid
+      PublicR53Domain: something.example.com
+      PublicR53ZoneId: Z3SOMEID3H
+      PrivateR53Domain: something.example.com
+      PrivateR53ZoneId: Z0SOMEIDLW
+      KeyPair: krunal-sb2
+      AmznLinux2X86Ami: ami-someid
+      AmznLinuxAmi: ami-someid
+    qa:
+      VpcId: vpc-someid
+      VpcCidr: 10.0.0.0/16
+      PublicSubnetA: subnet-someid
+      PublicSubnetB: subnet-someid
+      PublicSubnetC: subnet-someid
+      PrivateSubnetA: subnet-someid
+      PrivateSubnetB: subnet-someid
+      PrivateSubnetC: subnet-someid
+      PublicR53Domain: something.example.com
+      PublicR53ZoneId: Z3SOMEID3H
+      PrivateR53Domain: something.example.com
+      PrivateR53ZoneId: Z0SOMEIDLW
+      KeyPair: krunal-sb2
+      AmznLinux2X86Ami: ami-someid
+      AmznLinuxAmi: ami-someid
+    stg:
+      VpcId: vpc-someid
+      VpcCidr: 10.0.0.0/16
+      PublicSubnetA: subnet-someid
+      PublicSubnetB: subnet-someid
+      PublicSubnetC: subnet-someid
+      PrivateSubnetA: subnet-someid
+      PrivateSubnetB: subnet-someid
+      PrivateSubnetC: subnet-someid
+      PublicR53Domain: something.example.com
+      PublicR53ZoneId: Z3SOMEID3H
+      PrivateR53Domain: something.example.com
+      PrivateR53ZoneId: Z0SOMEIDLW
+      KeyPair: krunal-sb2
+      AmznLinux2X86Ami: ami-someid
+      AmznLinuxAmi: ami-someid
+    prd:
+      VpcId: vpc-someid
+      VpcCidr: 10.0.0.0/16
+      PublicSubnetA: subnet-someid
+      PublicSubnetB: subnet-someid
+      PublicSubnetC: subnet-someid
+      PrivateSubnetA: subnet-someid
+      PrivateSubnetB: subnet-someid
+      PrivateSubnetC: subnet-someid
+      PublicR53Domain: something.example.com
+      PublicR53ZoneId: Z3SOMEID3H
+      PrivateR53Domain: something.example.com
+      PrivateR53ZoneId: Z0SOMEIDLW
+      KeyPair: krunal-sb2
+      AmznLinux2X86Ami: ami-someid
+      AmznLinuxAmi: ami-someid
+
+  MSK:
+    dev:
+      KafkaVersion: 2.2.1
+      KafkaSize: kafka.m5.large
+      NumOfBrokers: "3"
+      MSKEbsVolSize: 100
+    qa:
+      KafkaVersion: 2.2.1
+      KafkaSize: kafka.m5.large
+      NumOfBrokers: "3"
+      MSKEbsVolSize: 100
+    stg:
+      KafkaVersion: 2.2.1
+      KafkaSize: kafka.m5.large
+      NumOfBrokers: "3"
+      MSKEbsVolSize: 100
+    prd:
+      KafkaVersion: 2.2.1
+      KafkaSize: kafka.m5.large
+      NumOfBrokers: "3"
+      MSKEbsVolSize: 100
+
+  RDS:
+    dev:
+      InstanceClass: db.t2.small
+      DBName: mydb
+      Engine: postgres
+      EngineVersion: 11.5
+      AllocatedStorage: 100
+      PreferredBackupWindow: "10:05-10:35"
+      PreferredMaintenanceWindow: "sat:11:00-sat:11:30"
+    qa:
+      InstanceClass: db.t2.small
+      DBName: mydb
+      Engine: postgres
+      EngineVersion: 11.5
+      AllocatedStorage: 100
+      PreferredBackupWindow: "10:05-10:35"
+      PreferredMaintenanceWindow: "sat:11:00-sat:11:30"
+    stg:
+      InstanceClass: db.t2.small
+      DBName: mydb
+      Engine: postgres
+      EngineVersion: 11.5
+      AllocatedStorage: 100
+      PreferredBackupWindow: "10:05-10:35"
+      PreferredMaintenanceWindow: "sat:11:00-sat:11:30"
+    prd:
+      InstanceClass: db.t2.small
+      DBName: mydb
+      Engine: postgres
+      EngineVersion: 11.5
+      AllocatedStorage: 100
+      PreferredBackupWindow: "10:05-10:35"
+      PreferredMaintenanceWindow: "sat:11:00-sat:11:30"
+
+  ES: #elasticsearch
+    dev:
+      ESInstanceType: m5.large.elasticsearch
+      ESInstanceCount: 3
+      ESMasterInstanceType: m5.large.elasticsearch
+      ESVersion: 7.1
+      ESEbsVolSize: 100
+    qa:
+      ESInstanceType: m5.large.elasticsearch
+      ESInstanceCount: 3
+      ESMasterInstanceType: m5.large.elasticsearch
+      ESVersion: 7.1
+      ESEbsVolSize: 100
+    stg:
+      ESInstanceType: m5.large.elasticsearch
+      ESInstanceCount: 3
+      ESMasterInstanceType: m5.large.elasticsearch
+      ESVersion: 7.1
+      ESEbsVolSize: 100
+    prd:
+      ESInstanceType: m5.large.elasticsearch
+      ESInstanceCount: 3
+      ESMasterInstanceType: m5.large.elasticsearch
+      ESVersion: 7.1
+      ESEbsVolSize: 100
+
+  EMR:
+    dev:
+      EmrEbsRootVolumeSize: 100
+      EmrReleaseLabel: emr-5.21.0
+      EmrMasterType: c5.9xlarge
+      EmrMasterEbsSize: 40
+      EmrCoreType: c5.4xlarge
+      EmrCoreEbsSize: 40
+      EmrTaskType: c5.4xlarge
+      EmrTaskEbsSize: 40
+      CoreMaxCapacity: 1
+      CoreMinCapacity: 1
+      CoreInstanceCount: 1
+      TaskMaxCapacity: 1
+      TaskMinCapacity: 1
+      TaskInstanceCount: 1
+    qa:
+      EmrEbsRootVolumeSize: 100
+      EmrReleaseLabel: emr-5.21.0
+      EmrMasterType: c5.9xlarge
+      EmrMasterEbsSize: 40
+      EmrCoreType: c5.4xlarge
+      EmrCoreEbsSize: 40
+      EmrTaskType: c5.4xlarge
+      EmrTaskEbsSize: 40
+      CoreMaxCapacity: 1
+      CoreMinCapacity: 1
+      CoreInstanceCount: 1
+      TaskMaxCapacity: 1
+      TaskMinCapacity: 1
+      TaskInstanceCount: 1
+    stg:
+      EmrEbsRootVolumeSize: 100
+      EmrReleaseLabel: emr-5.21.0
+      EmrMasterType: c5.9xlarge
+      EmrMasterEbsSize: 40
+      EmrCoreType: c5.4xlarge
+      EmrCoreEbsSize: 40
+      EmrTaskType: c5.4xlarge
+      EmrTaskEbsSize: 40
+      CoreMaxCapacity: 1
+      CoreMinCapacity: 1
+      CoreInstanceCount: 1
+      TaskMaxCapacity: 1
+      TaskMinCapacity: 1
+      TaskInstanceCount: 1
+    prd:
+      EmrEbsRootVolumeSize: 100
+      EmrReleaseLabel: emr-5.21.0
+      EmrMasterType: c5.9xlarge
+      EmrMasterEbsSize: 40
+      EmrCoreType: c5.4xlarge
+      EmrCoreEbsSize: 40
+      EmrTaskType: c5.4xlarge
+      EmrTaskEbsSize: 40
+      CoreMaxCapacity: 1
+      CoreMinCapacity: 1
+      CoreInstanceCount: 1
+      TaskMaxCapacity: 1
+      TaskMinCapacity: 1
+      TaskInstanceCount: 1
+
+  EKS:
+    dev:
+      EksVersion: 1.14
+      NodeVolumeSize: 40
+      NodeInstanceType: t3.medium
+      NodeDesiredCapacity: 3
+      NodeMinSize: 3
+      NodeMaxSize: 3
+      EndpointPublicAccess: false
+      EndpointPrivateAccess: true
+    qa:
+      EksVersion: 1.14
+      NodeVolumeSize: 40
+      NodeInstanceType: t3.medium
+      NodeDesiredCapacity: 3
+      NodeMinSize: 3
+      NodeMaxSize: 3
+      EndpointPublicAccess: false
+      EndpointPrivateAccess: true
+    stg:
+      EksVersion: 1.14
+      NodeVolumeSize: 40
+      NodeInstanceType: t3.medium
+      NodeDesiredCapacity: 3
+      NodeMinSize: 3
+      NodeMaxSize: 3
+      EndpointPublicAccess: false
+      EndpointPrivateAccess: true
+    prd:
+      EksVersion: 1.14
+      NodeVolumeSize: 200
+      NodeInstanceType: t3.large
+      NodeDesiredCapacity: 3
+      NodeMinSize: 3
+      NodeMaxSize: 3
+      EndpointPublicAccess: false
+      EndpointPrivateAccess: true
+
+  Ecache: #ElasticCache
+    dev:
+      CacheNodeType: cache.t2.medium #Make sure to check docs for types that support all kinds of encryption with elasticache, if enabled
+      EngineVersion: 5.0.5 #redis cluster is assumed
+      NumCacheNodes: 1
+    qa:
+      CacheNodeType: cache.t2.medium
+      EngineVersion: 5.0.5
+      NumCacheNodes: 1
+    stg:
+      CacheNodeType: cache.t2.medium
+      EngineVersion: 5.0.5
+      NumCacheNodes: 1
+    prd:
+      CacheNodeType: cache.t2.medium
+      EngineVersion: 5.0.5
+      NumCacheNodes: 1
+
+Resources:
+  # Common parameters
+  VpcId:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/common/vpcid"
+      Type: "String"
+      Value: !FindInMap
+        - Common
+        - !Ref "StageName"
+        - VpcId
+  VpcCidr:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/common/vpccidr"
+      Type: "String"
+      Value: !FindInMap
+        - Common
+        - !Ref "StageName"
+        - VpcCidr
+  PublicSubnetA:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/common/publicsubnetA"
+      Type: "String"
+      Value: !FindInMap
+        - Common
+        - !Ref "StageName"
+        - PublicSubnetA
+  PublicSubnetB:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/common/publicsubnetB"
+      Type: "String"
+      Value: !FindInMap
+        - Common
+        - !Ref "StageName"
+        - PublicSubnetB
+  PublicSubnetC:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/common/publicsubnetC"
+      Type: "String"
+      Value: !FindInMap
+        - Common
+        - !Ref "StageName"
+        - PublicSubnetC
+  PrivateSubnetA:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/common/privatesubnetA"
+      Type: "String"
+      Value: !FindInMap
+        - Common
+        - !Ref "StageName"
+        - PrivateSubnetA
+  PrivateSubnetB:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/common/privatesubnetB"
+      Type: "String"
+      Value: !FindInMap
+        - Common
+        - !Ref "StageName"
+        - PrivateSubnetB
+  PrivateSubnetC:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/common/privatesubnetC"
+      Type: "String"
+      Value: !FindInMap
+        - Common
+        - !Ref "StageName"
+        - PrivateSubnetC
+  PublicR53Domain:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/common/publicr53domain"
+      Type: "String"
+      Value: !FindInMap
+        - Common
+        - !Ref "StageName"
+        - PublicR53Domain
+  PrivateR53Domain:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/common/privater53domain"
+      Type: "String"
+      Value: !FindInMap
+        - Common
+        - !Ref "StageName"
+        - PrivateR53Domain
+  KeyPair:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/common/keypair"
+      Type: "String"
+      Value: !FindInMap
+        - Common
+        - !Ref "StageName"
+        - KeyPair
+  AmznLinux2X86Ami:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/common/amznlinux2x86ami"
+      Type: "String"
+      Value: !FindInMap
+        - Common
+        - !Ref "StageName"
+        - AmznLinux2X86Ami
+  AmznLinuxAmi:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/common/amznlinuxami"
+      Type: "String"
+      Value: !FindInMap
+        - Common
+        - !Ref "StageName"
+        - AmznLinuxAmi
+  PublicR53ZoneId:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/common/publicr53zoneid"
+      Type: "String"
+      Value: !FindInMap
+        - Common
+        - !Ref "StageName"
+        - PublicR53ZoneId
+  PrivateR53ZoneId:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/common/privater53zoneid"
+      Type: "String"
+      Value: !FindInMap
+        - Common
+        - !Ref "StageName"
+        - PrivateR53ZoneId
+
+  # MSK parameters
+  KafkaVersion:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/msk/kafkaversion"
+      Type: "String"
+      Value: !FindInMap
+        - MSK
+        - !Ref "StageName"
+        - KafkaVersion
+  KafkaSize:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/msk/kafkasize"
+      Type: "String"
+      Value: !FindInMap
+        - MSK
+        - !Ref "StageName"
+        - KafkaSize
+  NumOfBrokers:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/msk/numofbrokers"
+      Type: "String"
+      Value: !FindInMap
+        - MSK
+        - !Ref "StageName"
+        - NumOfBrokers
+  MSKEbsVolSize:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/msk/mskebsvolsize"
+      Type: "String"
+      Value: !FindInMap
+        - MSK
+        - !Ref "StageName"
+        - MSKEbsVolSize
+
+  # RDS parameters
+  InstanceClass:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/rds/instanceclass"
+      Type: "String"
+      Value: !FindInMap
+        - RDS
+        - !Ref "StageName"
+        - InstanceClass
+  DBName:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/rds/dbname"
+      Type: "String"
+      Value: !FindInMap
+        - RDS
+        - !Ref "StageName"
+        - DBName
+  Engine:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/rds/engine"
+      Type: "String"
+      Value: !FindInMap
+        - RDS
+        - !Ref "StageName"
+        - Engine
+  EngineVersion:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/rds/engineversion"
+      Type: "String"
+      Value: !FindInMap
+        - RDS
+        - !Ref "StageName"
+        - EngineVersion
+  AllocatedStorage:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/rds/allocatedstorage"
+      Type: "String"
+      Value: !FindInMap
+        - RDS
+        - !Ref "StageName"
+        - AllocatedStorage
+  PreferredBackupWindow:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/rds/preferredbackupwindow"
+      Type: "String"
+      Value: !FindInMap
+        - RDS
+        - !Ref "StageName"
+        - PreferredBackupWindow
+  PreferredMaintenanceWindow:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/rds/preferredmaintenancewindow"
+      Type: "String"
+      Value: !FindInMap
+        - RDS
+        - !Ref "StageName"
+        - PreferredMaintenanceWindow
+
+  # Elasticsearch parameters
+  ESInstanceType:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/es/esinstancetype"
+      Type: "String"
+      Value: !FindInMap
+        - ES
+        - !Ref "StageName"
+        - ESInstanceType
+  ESInstanceCount:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/es/esinstancecount"
+      Type: "String"
+      Value: !FindInMap
+        - ES
+        - !Ref "StageName"
+        - ESInstanceCount
+  ESMasterInstanceType:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/es/esmasterinstancetype"
+      Type: "String"
+      Value: !FindInMap
+        - ES
+        - !Ref "StageName"
+        - ESMasterInstanceType
+  ESVersion:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/es/esversion"
+      Type: "String"
+      Value: !FindInMap
+        - ES
+        - !Ref "StageName"
+        - ESVersion
+  ESEbsVolSize:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/es/esebsvolsize"
+      Type: "String"
+      Value: !FindInMap
+        - ES
+        - !Ref "StageName"
+        - ESEbsVolSize
+
+  # Emr parameters
+  EmrEbsRootVolumeSize:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/emr/emrebsrootvolumesize"
+      Type: "String"
+      Value: !FindInMap
+        - EMR
+        - !Ref "StageName"
+        - EmrEbsRootVolumeSize
+  EmrReleaseLabel:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/emr/emrreleaselabel"
+      Type: "String"
+      Value: !FindInMap
+        - EMR
+        - !Ref "StageName"
+        - EmrReleaseLabel
+  EmrMasterType:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/emr/emrmastertype"
+      Type: "String"
+      Value: !FindInMap
+        - EMR
+        - !Ref "StageName"
+        - EmrMasterType
+  EmrMasterEbsSize:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/emr/emrmasterebssize"
+      Type: "String"
+      Value: !FindInMap
+        - EMR
+        - !Ref "StageName"
+        - EmrMasterEbsSize
+  EmrCoreType:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/emr/emrcoretype"
+      Type: "String"
+      Value: !FindInMap
+        - EMR
+        - !Ref "StageName"
+        - EmrCoreType
+  EmrCoreEbsSize:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/emr/emrcoreebssize"
+      Type: "String"
+      Value: !FindInMap
+        - EMR
+        - !Ref "StageName"
+        - EmrCoreEbsSize
+  EmrTaskType:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/emr/emrtasktype"
+      Type: "String"
+      Value: !FindInMap
+        - EMR
+        - !Ref "StageName"
+        - EmrTaskType
+  EmrTaskEbsSize:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/emr/emrtaskebssize"
+      Type: "String"
+      Value: !FindInMap
+        - EMR
+        - !Ref "StageName"
+        - EmrTaskEbsSize
+  EmrCoreMaxCapacity:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/emr/coremaxcapacity"
+      Type: "String"
+      Value: !FindInMap
+        - EMR
+        - !Ref "StageName"
+        - CoreMaxCapacity
+  EmrCoreMinCapacity:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/emr/coremincapacity"
+      Type: "String"
+      Value: !FindInMap
+        - EMR
+        - !Ref "StageName"
+        - CoreMinCapacity
+  EmrCoreInstanceCount:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/emr/coreinstancecount"
+      Type: "String"
+      Value: !FindInMap
+        - EMR
+        - !Ref "StageName"
+        - CoreInstanceCount
+  EmrTaskMaxCapacity:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/emr/taskmaxcapacity"
+      Type: "String"
+      Value: !FindInMap
+        - EMR
+        - !Ref "StageName"
+        - TaskMaxCapacity
+  EmrTaskMinCapacity:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/emr/taskmincapacity"
+      Type: "String"
+      Value: !FindInMap
+        - EMR
+        - !Ref "StageName"
+        - TaskMinCapacity
+  EmrTaskInstanceCount:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/emr/taskinstancecount"
+      Type: "String"
+      Value: !FindInMap
+        - EMR
+        - !Ref "StageName"
+        - TaskInstanceCount
+
+  # Eks parameters
+  EksVersion:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/eks/eksversion"
+      Type: "String"
+      Value: !FindInMap
+        - EKS
+        - !Ref "StageName"
+        - EksVersion
+  NodeVolumeSize:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/eks/nodevolumesize"
+      Type: "String"
+      Value: !FindInMap
+        - EKS
+        - !Ref "StageName"
+        - NodeVolumeSize
+  NodeInstanceType:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/eks/nodeinstancetype"
+      Type: "String"
+      Value: !FindInMap
+        - EKS
+        - !Ref "StageName"
+        - NodeInstanceType
+  NodeDesiredCapacity:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/eks/nodedesiredcapacity"
+      Type: "String"
+      Value: !FindInMap
+        - EKS
+        - !Ref "StageName"
+        - NodeDesiredCapacity
+  NodeMinSize:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/eks/nodeminsize"
+      Type: "String"
+      Value: !FindInMap
+        - EKS
+        - !Ref "StageName"
+        - NodeMinSize
+  NodeMaxSize:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/eks/nodemaxsize"
+      Type: "String"
+      Value: !FindInMap
+        - EKS
+        - !Ref "StageName"
+        - NodeMaxSize
+  EndpointPublicAccess:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/eks/endpointpublicaccess"
+      Type: "String"
+      Value: !FindInMap
+        - EKS
+        - !Ref "StageName"
+        - EndpointPublicAccess
+  EndpointPrivateAccess:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/eks/endpointprivateaccess"
+      Type: "String"
+      Value: !FindInMap
+        - EKS
+        - !Ref "StageName"
+        - EndpointPrivateAccess
+
+  # ElasticCache Parameters
+  ECCacheNodeType:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/ecache/cachenodetype"
+      Type: "String"
+      Value: !FindInMap
+        - Ecache
+        - !Ref "StageName"
+        - CacheNodeType
+  ECEngineVersion:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: !Sub "/me/${StageName}/ecache/engineversion"
+      Type: "String"
+      Value: !FindInMap
+        - Ecache
+        - !Ref "StageName"
+        - EngineVersion

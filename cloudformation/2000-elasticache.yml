@@ -1,0 +1,111 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: ElasticCache template
+#useful docs: NodeType supporting encryption: https://docs.aws.amazon.com/AmazonElastiCache/latest/red-ug/in-transit-encryption.html
+#enabling encryption could cause performance issues.
+#   To test elasticache using redis-cli after creating the cluster/replication group:
+#   ---For cluster/replicationgroup without encryption---
+#  Follow https://docs.aws.amazon.com/AmazonElastiCache/latest/red-ug/GettingStarted.ConnectToCacheNode.html
+#   ---For cluster/replicationgroup with encryption---
+#  Follow https://docs.aws.amazon.com/AmazonElastiCache/latest/red-ug/in-transit-encryption.html
+
+Parameters:
+  S3Bucket:
+    Type: String
+  S3Prefix:
+    Type: String
+  StageName:
+    Type: String
+Conditions:
+  IsProd: !Equals
+    - !Ref "StageName"
+    - prd
+
+Resources:
+  EcacheSubnetGroup:
+    Type: "AWS::ElastiCache::SubnetGroup"
+    Properties:
+      CacheSubnetGroupName: !Sub "EcacheSubnetGroup-${StageName}"
+      Description: Cache Subnet Group
+      SubnetIds:
+        - !Sub "{{resolve:ssm:/me/${StageName}/common/privatesubnetA:1}}"
+        - !Sub "{{resolve:ssm:/me/${StageName}/common/privatesubnetB:1}}"
+        - !Sub "{{resolve:ssm:/me/${StageName}/common/privatesubnetC:1}}"
+
+  EcacheSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: Elasticache Security Group
+      VpcId: !Sub "{{resolve:ssm:/me/${StageName}/common/vpcid:1}}"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: "6379"
+          ToPort: "6379"
+          CidrIp: !Sub "{{resolve:ssm:/me/${StageName}/common/vpccidr:1}}"
+
+  ECacheKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: "MDM Ecache CMK"
+      KeyPolicy:
+        Version: "2012-10-17"
+        Id: "default"
+        Statement:
+          - Sid: "Enable IAM User Permissions"
+            Effect: "Allow"
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+
+  # Replication Group is a collection of Elasticache clusters, with high-availability, failover, shard etc features. Desirable for prod.
+  EcacheReplGroup:
+    Type: AWS::ElastiCache::ReplicationGroup
+    Properties:
+      ReplicationGroupDescription: Elasticache Replication Group for redis
+      AtRestEncryptionEnabled: true
+      AutomaticFailoverEnabled: true
+      CacheNodeType: !Sub "{{resolve:ssm:/me/${StageName}/ecache/cachenodetype:1}}"
+      CacheSubnetGroupName: !Ref EcacheSubnetGroup
+      Engine: redis
+      EngineVersion: !Sub "{{resolve:ssm:/me/${StageName}/ecache/engineversion:1}}"
+      KmsKeyId: !Ref ECacheKey
+      NumCacheClusters:
+        !If #value has to be between 2 or 6 if AutomaticFailoverEnabled is true
+        - IsProd
+        - 5
+        - 2
+      Port: 6379
+      PreferredMaintenanceWindow: sun:23:00-mon:00:30
+      SecurityGroupIds:
+        - !Ref EcacheSecurityGroup
+      SnapshotRetentionLimit: !If
+        - IsProd
+        - 15
+        - 0
+      SnapshotWindow: 01:00-05:00
+      TransitEncryptionEnabled: true
+
+  RedisDNSRecordSet:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      Comment: "Redis Cluster DNS"
+      HostedZoneId: !Sub "{{resolve:ssm:/me/${StageName}/common/privater53zoneid:1}}"
+      TTL: 300
+      ResourceRecords:
+        - !GetAtt "EcacheReplGroup.PrimaryEndPoint.Address"
+      Name: !Join
+        - ""
+        - - dataplatform-redis-
+          - !Ref "StageName"
+          - .
+          - !Sub "{{resolve:ssm:/me/${StageName}/common/privater53domain:1}}"
+      Type: CNAME
+
+Outputs:
+  RedisPrimaryEndpoint:
+    Value: !Join
+      - ":"
+      - - !GetAtt "EcacheReplGroup.PrimaryEndPoint.Address"
+        - !GetAtt "EcacheReplGroup.PrimaryEndPoint.Port"
+  RedisEndpoint:
+    Value: !Ref RedisDNSRecordSet

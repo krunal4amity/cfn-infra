@@ -1,0 +1,421 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: EMR template
+#todo deleting the stack causes issues, due to security group dependencies. need to work out.
+Parameters:
+  S3Bucket:
+    Type: String
+  S3Prefix:
+    Type: String
+  StageName:
+    Type: String
+Conditions:
+  IsProd: !Equals
+    - !Ref "StageName"
+    - prd
+Resources:
+  #This EMR cluster is meant to be created in a private subnet. For an EMR cluster in a public subnet, some of the configuration would differ.
+  #All the ebs volumes are of type gp2.
+  # CORE instance count is 5 (1 for now for testing)
+  # TASK instance count is 5 (1 for now for testing)
+  #after the template gets created successfully master dns is available at 'master-<stage_name>.<route53 private zone fqdn>
+  # e.g. for a private zone myzaplabs.me.com and the stage being 'dev', master dns is resolvable privately at
+  # master-dev.myzaplabs.me.com
+  EmrCluster:
+    Type: AWS::EMR::Cluster
+    #    DependsOn:
+    #      - AppLog
+    Properties:
+      Name: !Sub "${StageName}-me-dataplatform-emr"
+      Applications: # no version need to be mentioned since releaselabel is being used.
+        - Name: Spark
+        - Name: Hive
+        - Name: Ganglia
+        - Name: Hadoop
+        - Name: Zeppelin
+        - Name: Livy
+        - Name: Hue
+      AutoScalingRole: !Ref EmrAGRole
+      BootstrapActions:
+        - Name: Custom Action
+          ScriptBootstrapAction:
+            Path: !Sub "s3://${S3Bucket}/${S3Prefix}/bootstrapemr.sh"
+      Configurations:
+        - Classification: spark
+          ConfigurationProperties:
+            maximizeResourceAllocation: true
+      EbsRootVolumeSize: !Sub "{{resolve:ssm:/me/${StageName}/emr/emrebsrootvolumesize:1}}"
+      Instances:
+        Ec2KeyName: !Sub "{{resolve:ssm:/me/${StageName}/common/keypair:1}}"
+        Ec2SubnetId: !Sub "{{resolve:ssm:/me/${StageName}/common/privatesubnetA:1}}" #choosing us-west-2a private subnet here...
+        MasterInstanceGroup:
+          Name: !Sub "${StageName}_emr_master"
+          Configurations:
+            - Classification: livy-conf
+              ConfigurationProperties:
+                livy.server.session.timeout: 1h
+                livy.server.session.state-retain.sec: 3600s
+                livy.cache-log.size: "2000"
+          EbsConfiguration:
+            EbsBlockDeviceConfigs:
+              - VolumeSpecification:
+                  SizeInGB: !Sub "{{resolve:ssm:/me/${StageName}/emr/emrmasterebssize:1}}"
+                  VolumeType: gp2
+          InstanceCount: 1
+          InstanceType: !Sub "{{resolve:ssm:/me/${StageName}/emr/emrmastertype:1}}" #c5.9xlarge
+          Market: ON_DEMAND
+        CoreInstanceGroup:
+          Name: !Sub "${StageName}_emr_core"
+          AutoScalingPolicy:
+            Constraints:
+              MaxCapacity: !Sub "{{resolve:ssm:/me/${StageName}/emr/coremaxcapacity:1}}"
+              MinCapacity: !Sub "{{resolve:ssm:/me/${StageName}/emr/coremincapacity:1}}"
+            Rules:
+              - Action:
+                  SimpleScalingPolicyConfiguration:
+                    AdjustmentType: CHANGE_IN_CAPACITY
+                    CoolDown: 300
+                    ScalingAdjustment: 1
+                Description: Scale out if YARNMemoryAvailablePercentage is less than 25
+                Name: ScaleOutMemoryPercentage
+                Trigger:
+                  CloudWatchAlarmDefinition:
+                    ComparisonOperator: LESS_THAN
+                    EvaluationPeriods: 1
+                    MetricName: YARNMemoryAvailablePercentage
+                    Namespace: AWS/ElasticMapReduce
+                    Period: 300
+                    Statistic: AVERAGE
+                    Threshold: 25
+                    Unit: PERCENT
+          Configurations:
+            - Classification: livy-conf
+              ConfigurationProperties:
+                livy.server.session.timeout: 1h
+                livy.server.session.state-retain.sec: 3600s
+                livy.cache-log.size: "2000"
+          EbsConfiguration:
+            EbsBlockDeviceConfigs:
+              - VolumeSpecification:
+                  SizeInGB: !Sub "{{resolve:ssm:/me/${StageName}/emr/emrcoreebssize:1}}"
+                  VolumeType: gp2
+          InstanceCount: !Sub "{{resolve:ssm:/me/${StageName}/emr/coreinstancecount:1}}"
+          InstanceType: !Sub "{{resolve:ssm:/me/${StageName}/emr/emrcoretype:1}}"
+          Market: ON_DEMAND
+        EmrManagedMasterSecurityGroup: !Ref MasterSG
+        EmrManagedSlaveSecurityGroup: !Ref SlaveSG
+        ServiceAccessSecurityGroup: !Ref ServiceAccessSG #this cannot be specified for a public subnet EMR cluster.
+        TerminationProtected: false
+      JobFlowRole: !Ref EmrEc2InstanceProfile
+      LogUri: !Sub "s3://${S3Bucket}/${S3Prefix}/"
+      ReleaseLabel: !Sub "{{resolve:ssm:/me/${StageName}/emr/emrreleaselabel:1}}" #emr-5.21.0
+      ScaleDownBehavior: TERMINATE_AT_TASK_COMPLETION
+      ServiceRole: !Ref EmrRole
+      VisibleToAllUsers: true
+
+  TaskGroup:
+    Type: AWS::EMR::InstanceGroupConfig
+    Properties:
+      Name: !Sub "${StageName}_emr_task"
+      AutoScalingPolicy:
+        Constraints:
+          MaxCapacity: !Sub "{{resolve:ssm:/me/${StageName}/emr/taskmaxcapacity:1}}"
+          MinCapacity: !Sub "{{resolve:ssm:/me/${StageName}/emr/taskmincapacity:1}}"
+        Rules:
+          - Action:
+              SimpleScalingPolicyConfiguration:
+                AdjustmentType: CHANGE_IN_CAPACITY
+                CoolDown: 300
+                ScalingAdjustment: 1
+            Description: Scale out if YARNMemoryAvailablePercentage is less than 25
+            Name: ScaleOutMemoryPercentage
+            Trigger:
+              CloudWatchAlarmDefinition:
+                ComparisonOperator: LESS_THAN
+                Dimensions:
+                  - Key: JobFlowId
+                    Value: !Ref EmrCluster
+                EvaluationPeriods: 1
+                MetricName: YARNMemoryAvailablePercentage
+                Namespace: AWS/ElasticMapReduce
+                Period: 300
+                Statistic: AVERAGE
+                Threshold: 25
+                Unit: PERCENT
+      Configurations:
+        - Classification: livy-conf
+          ConfigurationProperties:
+            livy.server.session.timeout: 1h
+            livy.server.session.state-retain.sec: 3600s
+            livy.cache-log.size: "2000"
+      EbsConfiguration:
+        EbsBlockDeviceConfigs:
+          - VolumeSpecification:
+              SizeInGB: !Sub "{{resolve:ssm:/me/${StageName}/emr/emrtaskebssize:1}}"
+              VolumeType: gp2
+      InstanceCount: !Sub "{{resolve:ssm:/me/${StageName}/emr/taskinstancecount:1}}"
+      InstanceRole: TASK
+      InstanceType: !Sub "{{resolve:ssm:/me/${StageName}/emr/emrtasktype:1}}" #c5.4xlarge
+      JobFlowId: !Ref EmrCluster
+      Market: ON_DEMAND
+  MasterSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Join
+        - "-"
+        - - EmrManagedMasterSecurityGroup
+          - !Ref "StageName"
+      GroupDescription: EmrManagedMasterSecurityGroup
+      VpcId: !Sub "{{resolve:ssm:/me/${StageName}/common/vpcid:1}}"
+      Tags:
+        - Key: Name
+          Value: !Join
+            - "-"
+            - - EmrManagedMasterSecurityGroup
+              - !Ref "StageName"
+  Master2MasterIngressTcp:
+    Type: "AWS::EC2::SecurityGroupIngress"
+    Properties:
+      GroupId: !GetAtt MasterSG.GroupId
+      IpProtocol: tcp
+      FromPort: 0
+      ToPort: 65535
+      SourceSecurityGroupId: !GetAtt MasterSG.GroupId
+  Master2SlaveIngressTcp:
+    Type: "AWS::EC2::SecurityGroupIngress"
+    Properties:
+      GroupId: !GetAtt MasterSG.GroupId
+      IpProtocol: tcp
+      FromPort: 0
+      ToPort: 65535
+      SourceSecurityGroupId: !GetAtt SlaveSG.GroupId
+  Master2ServiceAccessIngressTcp:
+    Type: "AWS::EC2::SecurityGroupIngress"
+    Properties:
+      GroupId: !GetAtt MasterSG.GroupId
+      IpProtocol: tcp
+      FromPort: 0
+      ToPort: 65535
+      SourceSecurityGroupId: !GetAtt ServiceAccessSG.GroupId
+  Master2MasterIngressUdp:
+    Type: "AWS::EC2::SecurityGroupIngress"
+    Properties:
+      GroupId: !GetAtt MasterSG.GroupId
+      IpProtocol: udp
+      FromPort: 0
+      ToPort: 65535
+      SourceSecurityGroupId: !GetAtt MasterSG.GroupId
+  Master2SlaveIngressUdp:
+    Type: "AWS::EC2::SecurityGroupIngress"
+    Properties:
+      GroupId: !GetAtt MasterSG.GroupId
+      IpProtocol: udp
+      FromPort: 0
+      ToPort: 65535
+      SourceSecurityGroupId: !GetAtt SlaveSG.GroupId
+  Master2ServiceAccessIngressUdp:
+    Type: "AWS::EC2::SecurityGroupIngress"
+    Properties:
+      GroupId: !GetAtt MasterSG.GroupId
+      IpProtocol: udp
+      FromPort: 0
+      ToPort: 65535
+      SourceSecurityGroupId: !GetAtt ServiceAccessSG.GroupId
+  SlaveSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Join
+        - "-"
+        - - EmrManagedSlaveSecurityGroup
+          - !Ref "StageName"
+      GroupDescription: EmrManagedSlaveSecurityGroup
+      VpcId: !Sub "{{resolve:ssm:/me/${StageName}/common/vpcid:1}}"
+      Tags:
+        - Key: Name
+          Value: !Join
+            - "-"
+            - - EmrManagedSlaveSecurityGroup
+              - !Ref "StageName"
+  Slave2SlaveIngressTcp:
+    Type: "AWS::EC2::SecurityGroupIngress"
+    Properties:
+      GroupId: !GetAtt SlaveSG.GroupId
+      IpProtocol: tcp
+      FromPort: 0
+      ToPort: 65535
+      SourceSecurityGroupId: !GetAtt SlaveSG.GroupId
+  Slave2MasterIngressTcp:
+    Type: "AWS::EC2::SecurityGroupIngress"
+    Properties:
+      GroupId: !GetAtt SlaveSG.GroupId
+      IpProtocol: tcp
+      FromPort: 0
+      ToPort: 65535
+      SourceSecurityGroupId: !GetAtt MasterSG.GroupId
+  Slave2ServiceAccessIngressTcp:
+    Type: "AWS::EC2::SecurityGroupIngress"
+    Properties:
+      GroupId: !GetAtt SlaveSG.GroupId
+      IpProtocol: tcp
+      FromPort: 8443
+      ToPort: 8443
+      SourceSecurityGroupId: !GetAtt ServiceAccessSG.GroupId
+  Slave2SlaveIngressUdp:
+    Type: "AWS::EC2::SecurityGroupIngress"
+    Properties:
+      GroupId: !GetAtt SlaveSG.GroupId
+      IpProtocol: udp
+      FromPort: 0
+      ToPort: 65535
+      SourceSecurityGroupId: !GetAtt SlaveSG.GroupId
+  Slave2MasterIngressUdp:
+    Type: "AWS::EC2::SecurityGroupIngress"
+    Properties:
+      GroupId: !GetAtt SlaveSG.GroupId
+      IpProtocol: udp
+      FromPort: 0
+      ToPort: 65535
+      SourceSecurityGroupId: !GetAtt MasterSG.GroupId
+  ServiceAccessSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Join
+        - "-"
+        - - EmrServiceAccessSecurityGroup
+          - !Ref "StageName"
+      GroupDescription: EmrManagedSlaveSecurityGroup
+      VpcId: !Sub "{{resolve:ssm:/me/${StageName}/common/vpcid:1}}"
+      Tags:
+        - Key: Name
+          Value: !Join
+            - "-"
+            - - EmrServiceAccessSecurityGroup
+              - !Ref "StageName"
+  ServiceAccess2MasterEgress:
+    Type: "AWS::EC2::SecurityGroupEgress"
+    Properties:
+      GroupId: !GetAtt ServiceAccessSG.GroupId
+      IpProtocol: tcp
+      FromPort: 8443
+      ToPort: 8443
+      DestinationSecurityGroupId: !GetAtt MasterSG.GroupId
+  ServiceAccess2SlaveEgress:
+    Type: "AWS::EC2::SecurityGroupEgress"
+    Properties:
+      GroupId: !GetAtt ServiceAccessSG.GroupId
+      IpProtocol: tcp
+      FromPort: 8443
+      ToPort: 8443
+      DestinationSecurityGroupId: !GetAtt SlaveSG.GroupId
+  MasterDNSRecordSet:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      Comment: "EMR Master Public DNS"
+      HostedZoneId: !Sub "{{resolve:ssm:/me/${StageName}/common/privater53zoneid:1}}"
+      TTL: 300
+      ResourceRecords:
+        - !GetAtt "EmrCluster.MasterPublicDNS"
+      Name: !Join
+        - ""
+        - - dataplatform-masteremr-
+          - !Ref "StageName"
+          - .
+          - !Sub "{{resolve:ssm:/me/${StageName}/common/privater53domain:1}}"
+      Type: CNAME
+  #  AppLog:
+  #    Type: AWS::Logs::LogGroup
+  #    Properties:
+  #      RetentionInDays: '30' #retention period is currently 30 days.
+  #      LogGroupName: !Join
+  #        - /
+  #        - - !Sub '${StageName}-aws-app-logs'
+  #          - EMR
+  #          - !Sub me-data-platform-${StageName}'
+  EmrEc2RoleKey:
+    Type: "AWS::KMS::Key"
+    Properties:
+      KeyPolicy:
+        Version: 2012-10-17
+        Id: key-default-1
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt
+                - EmrEc2Role
+                - Arn
+            Action: "kms:*"
+            Resource: "*"
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Join
+                - ""
+                - - "arn:aws:iam::"
+                  - !Ref "AWS::AccountId"
+                  - ":root"
+            Action: "kms:*"
+            Resource: "*"
+  EmrAGRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Sub "EmrAGRole-${StageName}"
+      AssumeRolePolicyDocument:
+        Version: 2008-10-17
+        Statement:
+          - Sid: "EmrAGRoleEMR"
+            Effect: Allow
+            Principal:
+              Service: elasticmapreduce.amazonaws.com
+            Action: "sts:AssumeRole"
+          - Sid: "EmrAGRoleAppAG"
+            Effect: Allow
+            Principal:
+              Service: application-autoscaling.amazonaws.com
+            Action: "sts:AssumeRole"
+      Path: /
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AmazonElasticMapReduceforAutoScalingRole"
+  EmrRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Sub "EmrRole-${StageName}"
+      AssumeRolePolicyDocument:
+        Version: 2008-10-17
+        Statement:
+          - Sid: ""
+            Effect: Allow
+            Principal:
+              Service: elasticmapreduce.amazonaws.com
+            Action: "sts:AssumeRole"
+      Path: /
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AmazonElasticMapReduceRole"
+  EmrEc2Role:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Sub "EmrEc2Role-${StageName}"
+      AssumeRolePolicyDocument:
+        Version: 2008-10-17
+        Statement:
+          - Sid: ""
+            Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: "sts:AssumeRole"
+      Path: /
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AmazonElasticMapReduceforEC2Role"
+  EmrEc2InstanceProfile:
+    Type: "AWS::IAM::InstanceProfile"
+    Properties:
+      Path: /
+      Roles:
+        - !Ref EmrEc2Role
+Outputs:
+  keyArn:
+    Value: !GetAtt
+      - EmrEc2RoleKey
+      - Arn
+  EmrMasterUrl:
+    Description: Master DNS url of the EMR
+    Value: !Ref MasterDNSRecordSet
